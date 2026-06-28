@@ -119,6 +119,28 @@ Sequential left→right, top→bottom reveal:
 - Clicking overlay backdrop closes; clicking inside search box stops propagation
 - `focusOnMount` action: Svelte action that focuses the input element on mount
 
+## Command Bar
+- `:` key opens vim-style command bar at bottom of screen
+- `CMD_REGISTRY`: array of `{ name, desc }` objects — single source of truth for all commands
+- `cmdSuggestions()`: fuzzy-filters registry against both name and description using `fuzzyMatch`
+- Suggestions list renders above the input row, updates live as you type
+- `↑/↓` arrows move selection, `Tab` completes selected command into input
+- `Enter` with empty input runs selected suggestion; with text runs typed command
+- Clicking a suggestion runs it directly
+- `Escape` closes; errors shown inline in red
+- `cmdSel` resets to 0 on every input change
+
+### Available Commands
+| Command | Action |
+|---|---|
+| `help` | Open keyboard shortcuts popup |
+| `bird` / `birdseye` | Switch to bird's eye view |
+| `zoom` | Zoom into focused node |
+| `root` | Focus root node |
+| `search` | Open fuzzy search |
+| `focus <name>` | Focus node by exact name |
+| `q` / `quit` | Close command bar |
+
 ## Possible Next Steps
 - Add more nodes / deeper tree
 - Add labels or metadata to nodes

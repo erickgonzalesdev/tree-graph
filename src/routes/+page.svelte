@@ -141,6 +141,20 @@
 	let showSearch = $state(false);
 	let searchQuery = $state('');
 	let searchSel = $state(0);
+	let showCmd = $state(false);
+	let cmdInput = $state('');
+	let cmdError = $state('');
+	let cmdSel = $state(0);
+
+	const CMD_REGISTRY = [
+		{ name: 'help',     desc: 'open keyboard shortcuts' },
+		{ name: 'bird',     desc: 'switch to bird\'s eye view' },
+		{ name: 'zoom',     desc: 'zoom into focused node' },
+		{ name: 'root',     desc: 'focus root node' },
+		{ name: 'search',   desc: 'open fuzzy search' },
+		{ name: 'focus',    desc: 'focus <node name>' },
+		{ name: 'q',        desc: 'close command bar' },
+	];
 	let introduced = $state(false);
 	let rafId = 0;
 	let searchInput = $state<HTMLInputElement | null>(null);
@@ -170,6 +184,104 @@
 		showSearch = false;
 		searchQuery = '';
 		searchSel = 0;
+	}
+
+	function cmdSuggestions(): typeof CMD_REGISTRY {
+		const q = cmdInput.trim().toLowerCase();
+		if (!q) return CMD_REGISTRY;
+		return CMD_REGISTRY.filter(c => fuzzyMatch(q, c.name) || fuzzyMatch(q, c.desc));
+	}
+
+	function openCmd() {
+		showCmd = true;
+		cmdInput = '';
+		cmdError = '';
+		cmdSel = 0;
+	}
+
+	function closeCmd() {
+		showCmd = false;
+		cmdInput = '';
+		cmdError = '';
+		cmdSel = 0;
+	}
+
+	function runCmd(raw: string) {
+		const parts = raw.trim().split(/\s+/);
+		const cmd = parts[0].toLowerCase();
+		const args = parts.slice(1).join(' ');
+		if (cmd === 'q' || cmd === 'quit') {
+			closeCmd(); return;
+		}
+		if (cmd === 'help') {
+			closeCmd(); showHelp = true; return;
+		}
+		if (cmd === 'bird' || cmd === 'birdeye' || cmd === 'birdseye') {
+			closeCmd();
+			birdseye = true;
+			target = buildDefault();
+			startAnim();
+			return;
+		}
+		if (cmd === 'zoom') {
+			closeCmd();
+			birdseye = false;
+			target = buildFocused(focusId ?? 0);
+			startAnim();
+			return;
+		}
+		if (cmd === 'root') {
+			closeCmd(); birdseye = false; focusNode(0); return;
+		}
+		if (cmd === 'search') {
+			closeCmd(); openSearch(); return;
+		}
+		if (cmd === 'focus') {
+			if (!args) { cmdError = 'usage: focus <node name>'; return; }
+			const match = nodes.find(n => n.label.toLowerCase() === args.toLowerCase());
+			if (!match) { cmdError = `no node: "${args}"`; return; }
+			closeCmd(); birdseye = false; focusNode(match.id); return;
+		}
+		cmdError = `unknown command: "${cmd}"`;
+	}
+
+	function onCmdKey(e: KeyboardEvent) {
+		if (e.key === 'Escape') { e.preventDefault(); closeCmd(); return; }
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			const sugg = cmdSuggestions();
+			const input = cmdInput.trim();
+			if (!input && sugg[cmdSel]) {
+				const s = sugg[cmdSel];
+				cmdInput = s.name === 'focus' ? 'focus ' : s.name;
+				if (s.name !== 'focus') { runCmd(cmdInput); return; }
+			} else {
+				runCmd(cmdInput);
+			}
+			return;
+		}
+		if (e.key === 'Tab') {
+			e.preventDefault();
+			const sugg = cmdSuggestions();
+			if (sugg.length === 0) return;
+			const s = sugg[cmdSel];
+			cmdInput = s.name === 'focus' ? 'focus ' : s.name;
+			cmdSel = 0;
+			return;
+		}
+		if (e.key === 'ArrowUp') {
+			e.preventDefault();
+			cmdSel = Math.max(0, cmdSel - 1);
+			return;
+		}
+		if (e.key === 'ArrowDown') {
+			e.preventDefault();
+			const max = cmdSuggestions().length - 1;
+			cmdSel = Math.min(cmdSel + 1, max);
+			return;
+		}
+		cmdError = '';
+		cmdSel = 0;
 	}
 
 	function commitSearch() {
@@ -303,8 +415,10 @@
 	}
 
 	function onKeyNav(e: KeyboardEvent) {
+		if (showCmd) { if (e.key === 'Escape') closeCmd(); return; }
 		if (showSearch) { if (e.key === 'Escape') closeSearch(); return; }
 		const cur = focusId;
+		if (e.key === ':') { e.preventDefault(); openCmd(); return; }
 		if (e.key === '/') { e.preventDefault(); openSearch(); return; }
 		if (e.key === '?') { showHelp = !showHelp; return; }
 		if (e.key === 'Escape') { showHelp = false; return; }
@@ -520,6 +634,35 @@
 		</div>
 	{/if}
 
+	{#if showCmd}
+		<div class="cmd-bar">
+			{#if cmdSuggestions().length > 0}
+				<ul class="cmd-suggestions">
+					{#each cmdSuggestions() as s, i}
+						<li
+							class="cmd-suggestion"
+							class:selected={i === cmdSel}
+							onclick={() => { cmdInput = s.name === 'focus' ? 'focus ' : s.name; if (s.name !== 'focus') runCmd(cmdInput); }}
+							onmouseenter={() => { cmdSel = i; }}
+						><span class="cmd-sname">{s.name}</span><span class="cmd-sdesc">{s.desc}</span></li>
+					{/each}
+				</ul>
+			{/if}
+			<div class="cmd-input-row">
+				<span class="cmd-colon">:</span><input
+					class="cmd-input"
+					bind:value={cmdInput}
+					autocomplete="off"
+					spellcheck={false}
+					onkeydown={onCmdKey}
+					oninput={() => { cmdSel = 0; cmdError = ''; }}
+					use:focusOnMount
+				/>
+				{#if cmdError}<span class="cmd-error">{cmdError}</span>{/if}
+			</div>
+		</div>
+	{/if}
+
 	{#if showHelp}
 		<div class="help-overlay" onclick={() => showHelp = false} role="dialog" aria-modal="true">
 			<div class="help-box" onclick={(e) => e.stopPropagation()}>
@@ -533,6 +676,7 @@
 						<tr><td>Space</td><td>Toggle bird's eye view</td></tr>
 						<tr><td>Scroll</td><td>Scroll current column</td></tr>
 						<tr><td>/</td><td>Fuzzy search nodes</td></tr>
+					<tr><td>:</td><td>Command bar</td></tr>
 					<tr><td>?</td><td>Toggle this help</td></tr>
 						<tr><td>Esc</td><td>Close help</td></tr>
 					</tbody>
@@ -711,6 +855,81 @@
 	.search-result.selected {
 		background: #2e2e2e;
 		color: #e8e8e3;
+	}
+
+	.cmd-bar {
+		position: fixed;
+		bottom: 0;
+		left: 0;
+		right: 0;
+		background: #1a1a1a;
+		border-top: 1px solid #444;
+		z-index: 20;
+		font-family: 'JetBrains Mono', monospace;
+	}
+
+	.cmd-suggestions {
+		list-style: none;
+		margin: 0;
+		padding: 0.25rem 0;
+		border-bottom: 1px solid #333;
+	}
+
+	.cmd-suggestion {
+		display: flex;
+		gap: 1rem;
+		padding: 0.3rem 0.75rem;
+		cursor: pointer;
+		color: #888;
+		font-size: 0.8rem;
+	}
+
+	.cmd-suggestion.selected {
+		background: #2e2e2e;
+		color: #e8e8e3;
+	}
+
+	.cmd-sname {
+		min-width: 5rem;
+		color: inherit;
+		font-weight: 600;
+	}
+
+	.cmd-suggestion.selected .cmd-sname { color: #e8e8e3; }
+
+	.cmd-sdesc { color: #555; font-size: 0.78rem; }
+	.cmd-suggestion.selected .cmd-sdesc { color: #aaa; }
+
+	.cmd-input-row {
+		display: flex;
+		align-items: center;
+		padding: 0.35rem 0.75rem;
+		gap: 0.1rem;
+	}
+
+	.cmd-colon {
+		color: #e8e8e3;
+		font-size: 0.85rem;
+		user-select: none;
+	}
+
+	.cmd-input {
+		flex: 1;
+		background: transparent;
+		border: none;
+		outline: none;
+		color: #e8e8e3;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 0.85rem;
+		caret-color: #e8e8e3;
+		padding: 0;
+	}
+
+	.cmd-error {
+		color: #e06c75;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 0.8rem;
+		margin-left: 1rem;
 	}
 
 	.search-empty {
