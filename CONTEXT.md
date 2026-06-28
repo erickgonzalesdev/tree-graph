@@ -125,7 +125,7 @@ Sequential left→right, top→bottom reveal:
 - `cmdSuggestions()`: fuzzy-filters registry against both name and description using `fuzzyMatch`
 - Suggestions list renders above the input row, updates live as you type
 - `↑/↓` arrows move selection, `Tab` completes selected command into input
-- `Enter` with empty input runs selected suggestion; with text runs typed command
+- `Enter` runs the highlighted suggestion if it differs from typed input (works with partial typing); otherwise runs typed command directly
 - Clicking a suggestion runs it directly
 - `Escape` closes; errors shown inline in red
 - `cmdSel` resets to 0 on every input change

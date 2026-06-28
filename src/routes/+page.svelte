@@ -1,4 +1,8 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+
+	// --- Data ---
+
 	const nodes = [
 		{ id: 0, label: 'Node 1' },
 		{ id: 1, label: 'Node 2' },
@@ -22,15 +26,33 @@
 		return edges.filter(([, b]) => b === id).map(([a]) => a);
 	}
 
-	const CHAR_W = 0.6;
-	const FS_BASE    = 11;
-	const FS_STEP    = 4;
-	const FS_FOCUS   = 18;
-	const FS_MIN     = 5;
-	const ROW_H  = 40;
-	const COL_GAP = 70;
+	// --- Constants ---
+
+	const CHAR_W   = 0.6;
+	const FS_BASE  = 11;
+	const FS_STEP  = 4;
+	const FS_FOCUS = 18;
+	const FS_MIN   = 5;
+	const ROW_H    = 40;
+	const COL_GAP  = 70;
+	const SEG_DUR  = 22;
+	const CHAR_DUR = 12;
+
+	const CMD_REGISTRY = [
+		{ name: 'help',   desc: "open keyboard shortcuts" },
+		{ name: 'bird',   desc: "switch to bird's eye view" },
+		{ name: 'zoom',   desc: "zoom into focused node" },
+		{ name: 'root',   desc: "focus root node" },
+		{ name: 'search', desc: "open fuzzy search" },
+		{ name: 'focus',  desc: "focus <node name>" },
+		{ name: 'q',      desc: "close command bar" },
+	];
+
+	// --- Types ---
 
 	type NodePos = { x: number; y: number; fs: number; opacity: number };
+
+	// --- Layout helpers ---
 
 	function tw(label: string, fs: number) {
 		return label.length * CHAR_W * fs;
@@ -38,32 +60,26 @@
 
 	function depthOf(id: number): number {
 		const parents = getParents(id);
-		if (parents.length === 0) return 0;
-		return 1 + depthOf(parents[0]);
+		return parents.length === 0 ? 0 : 1 + depthOf(parents[0]);
 	}
 
 	function fsForDepth(depth: number): number {
 		return Math.max(FS_MIN, FS_BASE - depth * FS_STEP);
 	}
 
-	// Horizontal tree layout: depth → X, vertical center of subtree → Y
-	// Each leaf gets a unique Y slot. Parents are vertically centered on their children.
-	// This guarantees no edge crossings.
 	function buildDefault(): Record<number, NodePos> {
 		const COL_W = tw('Node X', FS_BASE) + COL_GAP;
 		const result: Record<number, NodePos> = {};
 
-		// First pass: assign a leaf-slot index to every leaf, in DFS order
 		let leafIndex = 0;
 		const leafSlot: Record<number, number> = {};
 		function assignLeaves(id: number) {
 			const ch = getChildren(id);
-			if (ch.length === 0) { leafSlot[id] = leafIndex++; }
-			else { ch.forEach(c => assignLeaves(c)); }
+			if (ch.length === 0) leafSlot[id] = leafIndex++;
+			else ch.forEach(c => assignLeaves(c));
 		}
 		assignLeaves(0);
 
-		// Second pass: Y of a node = average Y of its children's subtrees
 		function getY(id: number): number {
 			const ch = getChildren(id);
 			if (ch.length === 0) return leafSlot[id] * ROW_H;
@@ -85,220 +101,36 @@
 		return result;
 	}
 
-	// BFS distance
-	function getDistance(a: number, b: number): number {
-		if (a === b) return 0;
-		const visited = new Set<number>();
-		const queue: [number, number][] = [[a, 0]];
-		while (queue.length) {
-			const [cur, dist] = queue.shift()!;
-			if (cur === b) return dist;
-			if (visited.has(cur)) continue;
-			visited.add(cur);
-			[
-				...edges.filter(([x]) => x === cur).map(([, y]) => y),
-				...edges.filter(([, y]) => y === cur).map(([x]) => x)
-			].forEach(n => queue.push([n, dist + 1]));
-		}
-		return 99;
-	}
-
-	// Focused layout: use the SAME tree positions as buildDefault,
-	// shift so focused node is at center, scale font so focused depth = FS_FOCUS,
-	// nodes left of focus (ancestors) grow larger, nodes right (descendants) shrink further.
 	function buildFocused(fid: number): Record<number, NodePos> {
 		const base = buildDefault();
 		const fx = base[fid].x;
 		const fy = base[fid].y;
 		const focusDepth = depthOf(fid);
-
 		const scale = 1.3;
-
 		const result: Record<number, NodePos> = {};
 		nodes.forEach(n => {
 			const depthDelta = depthOf(n.id) - focusDepth;
-			const fs = Math.max(FS_MIN, FS_FOCUS - depthDelta * FS_STEP);
 			const absDelta = Math.abs(depthDelta);
-			const opacity = absDelta === 0 ? 1 : absDelta === 1 ? 0.85 : absDelta === 2 ? 0.55 : 0.3;
 			result[n.id] = {
 				x: (base[n.id].x - fx) * scale,
 				y: (base[n.id].y - fy) * scale,
-				fs,
-				opacity
+				fs: Math.max(FS_MIN, FS_FOCUS - depthDelta * FS_STEP),
+				opacity: absDelta === 0 ? 1 : absDelta === 1 ? 0.85 : absDelta === 2 ? 0.55 : 0.3
 			};
 		});
 		return result;
 	}
 
-	let target: Record<number, NodePos> = buildFocused(0);
-	let anim: Record<number, NodePos> = $state(
-		nodes.reduce((acc, n) => { acc[n.id] = { ...target[n.id] }; return acc; }, {} as Record<number, NodePos>)
-	);
-
-	let focusId = $state<number | null>(0);
-	let birdseye = $state(false);
-	let showHelp = $state(false);
-	let showSearch = $state(false);
-	let searchQuery = $state('');
-	let searchSel = $state(0);
-	let showCmd = $state(false);
-	let cmdInput = $state('');
-	let cmdError = $state('');
-	let cmdSel = $state(0);
-
-	const CMD_REGISTRY = [
-		{ name: 'help',     desc: 'open keyboard shortcuts' },
-		{ name: 'bird',     desc: 'switch to bird\'s eye view' },
-		{ name: 'zoom',     desc: 'zoom into focused node' },
-		{ name: 'root',     desc: 'focus root node' },
-		{ name: 'search',   desc: 'open fuzzy search' },
-		{ name: 'focus',    desc: 'focus <node name>' },
-		{ name: 'q',        desc: 'close command bar' },
-	];
-	let introduced = $state(false);
-	let rafId = 0;
-	let searchInput = $state<HTMLInputElement | null>(null);
-
-	function fuzzyMatch(query: string, label: string): boolean {
-		if (!query) return true;
-		const q = query.toLowerCase();
-		const l = label.toLowerCase();
-		let qi = 0;
-		for (let i = 0; i < l.length && qi < q.length; i++) {
-			if (l[i] === q[qi]) qi++;
-		}
-		return qi === q.length;
+	// Returns node IDs at a given depth, sorted top-to-bottom
+	function colAt(depth: number): number[] {
+		const base = buildDefault();
+		return nodes
+			.filter(n => depthOf(n.id) === depth)
+			.sort((a, b) => base[a.id].y - base[b.id].y)
+			.map(n => n.id);
 	}
 
-	function searchResults(): typeof nodes {
-		return nodes.filter(n => fuzzyMatch(searchQuery, n.label));
-	}
-
-	function openSearch() {
-		showSearch = true;
-		searchQuery = '';
-		searchSel = 0;
-	}
-
-	function closeSearch() {
-		showSearch = false;
-		searchQuery = '';
-		searchSel = 0;
-	}
-
-	function cmdSuggestions(): typeof CMD_REGISTRY {
-		const q = cmdInput.trim().toLowerCase();
-		if (!q) return CMD_REGISTRY;
-		return CMD_REGISTRY.filter(c => fuzzyMatch(q, c.name) || fuzzyMatch(q, c.desc));
-	}
-
-	function openCmd() {
-		showCmd = true;
-		cmdInput = '';
-		cmdError = '';
-		cmdSel = 0;
-	}
-
-	function closeCmd() {
-		showCmd = false;
-		cmdInput = '';
-		cmdError = '';
-		cmdSel = 0;
-	}
-
-	function runCmd(raw: string) {
-		const parts = raw.trim().split(/\s+/);
-		const cmd = parts[0].toLowerCase();
-		const args = parts.slice(1).join(' ');
-		if (cmd === 'q' || cmd === 'quit') {
-			closeCmd(); return;
-		}
-		if (cmd === 'help') {
-			closeCmd(); showHelp = true; return;
-		}
-		if (cmd === 'bird' || cmd === 'birdeye' || cmd === 'birdseye') {
-			closeCmd();
-			birdseye = true;
-			target = buildDefault();
-			startAnim();
-			return;
-		}
-		if (cmd === 'zoom') {
-			closeCmd();
-			birdseye = false;
-			target = buildFocused(focusId ?? 0);
-			startAnim();
-			return;
-		}
-		if (cmd === 'root') {
-			closeCmd(); birdseye = false; focusNode(0); return;
-		}
-		if (cmd === 'search') {
-			closeCmd(); openSearch(); return;
-		}
-		if (cmd === 'focus') {
-			if (!args) { cmdError = 'usage: focus <node name>'; return; }
-			const match = nodes.find(n => n.label.toLowerCase() === args.toLowerCase());
-			if (!match) { cmdError = `no node: "${args}"`; return; }
-			closeCmd(); birdseye = false; focusNode(match.id); return;
-		}
-		cmdError = `unknown command: "${cmd}"`;
-	}
-
-	function onCmdKey(e: KeyboardEvent) {
-		if (e.key === 'Escape') { e.preventDefault(); closeCmd(); return; }
-		if (e.key === 'Enter') {
-			e.preventDefault();
-			const sugg = cmdSuggestions();
-			const input = cmdInput.trim();
-			if (!input && sugg[cmdSel]) {
-				const s = sugg[cmdSel];
-				cmdInput = s.name === 'focus' ? 'focus ' : s.name;
-				if (s.name !== 'focus') { runCmd(cmdInput); return; }
-			} else {
-				runCmd(cmdInput);
-			}
-			return;
-		}
-		if (e.key === 'Tab') {
-			e.preventDefault();
-			const sugg = cmdSuggestions();
-			if (sugg.length === 0) return;
-			const s = sugg[cmdSel];
-			cmdInput = s.name === 'focus' ? 'focus ' : s.name;
-			cmdSel = 0;
-			return;
-		}
-		if (e.key === 'ArrowUp') {
-			e.preventDefault();
-			cmdSel = Math.max(0, cmdSel - 1);
-			return;
-		}
-		if (e.key === 'ArrowDown') {
-			e.preventDefault();
-			const max = cmdSuggestions().length - 1;
-			cmdSel = Math.min(cmdSel + 1, max);
-			return;
-		}
-		cmdError = '';
-		cmdSel = 0;
-	}
-
-	function commitSearch() {
-		const results = searchResults();
-		if (results[searchSel]) {
-			birdseye = false;
-			focusNode(results[searchSel].id);
-		}
-		closeSearch();
-	}
-
-	import { onMount } from 'svelte';
-	function focusOnMount(el: HTMLElement) { setTimeout(() => el.focus(), 0); }
-	onMount(() => { requestAnimationFrame(() => { introduced = true; }); });
-
-	const SEG_DUR = 22;
-	const CHAR_DUR = 12;
+	// --- Intro animation ---
 
 	function buildIntroSequence(): Record<string, number> {
 		const delays: Record<string, number> = {};
@@ -316,8 +148,6 @@
 		walk(0);
 		return delays;
 	}
-
-	const introSeq = buildIntroSequence();
 
 	function buildNodeTextDelays(): Record<number, number> {
 		const base = buildDefault();
@@ -338,41 +168,61 @@
 		return delays;
 	}
 
+	const introSeq = buildIntroSequence();
 	const nodeTextDelays = buildNodeTextDelays();
 
-	function nodeIntroDelay(id: number): number {
-		return nodeTextDelays[id] ?? 0;
-	}
+	// --- Animation ---
 
 	function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
+
+	let target: Record<number, NodePos> = buildFocused(0);
+	let anim: Record<number, NodePos> = $state(
+		nodes.reduce((acc, n) => { acc[n.id] = { ...target[n.id] }; return acc; }, {} as Record<number, NodePos>)
+	);
+	let rafId = 0;
 
 	function startAnim() {
 		cancelAnimationFrame(rafId);
 		const step = () => {
 			let moving = false;
 			const next: Record<number, NodePos> = {};
-				nodes.forEach(n => {
+			nodes.forEach(n => {
 				const a = anim[n.id];
 				const t = target[n.id];
 				const nx = lerp(a.x, t.x, 0.1);
 				const ny = lerp(a.y, t.y, 0.1);
-				const nfs = lerp(a.fs, t.fs, 0.1);
-				const nop = lerp(a.opacity, t.opacity, 0.1);
+				next[n.id] = { x: nx, y: ny, fs: lerp(a.fs, t.fs, 0.1), opacity: lerp(a.opacity, t.opacity, 0.1) };
 				if (Math.abs(nx - t.x) > 1 || Math.abs(ny - t.y) > 1) moving = true;
-				next[n.id] = { x: nx, y: ny, fs: nfs, opacity: nop };
 			});
-				anim = next;
+			anim = next;
 			if (moving) rafId = requestAnimationFrame(step);
 		};
 		rafId = requestAnimationFrame(step);
 	}
 
+	// --- State ---
+
+	let focusId  = $state<number | null>(0);
+	let birdseye = $state(false);
+	let showHelp = $state(false);
+	let showSearch  = $state(false);
+	let searchQuery = $state('');
+	let searchSel   = $state(0);
+	let showCmd  = $state(false);
+	let cmdInput = $state('');
+	let cmdError = $state('');
+	let cmdSel   = $state(0);
+	let introduced = $state(false);
+
+	onMount(() => { requestAnimationFrame(() => { introduced = true; }); });
+
+	function focusOnMount(el: HTMLElement) { setTimeout(() => el.focus(), 0); }
+
+	// --- Navigation ---
+
 	function focusNode(id: number) {
 		focusId = id;
-		if (!birdseye) {
-			target = buildFocused(id);
-			startAnim();
-		}
+		if (!birdseye) { target = buildFocused(id); startAnim(); }
 	}
 
 	function onClickNode(id: number) {
@@ -386,90 +236,42 @@
 		startAnim();
 	}
 
-	function getSiblings(id: number): number[] {
-		const parents = getParents(id);
-		if (parents.length === 0) return [];
-		return getChildren(parents[0]).filter(c => c !== id);
-	}
-
-	function getSiblingIndex(id: number): number {
-		const parents = getParents(id);
-		if (parents.length === 0) return 0;
-		return getChildren(parents[0]).indexOf(id);
-	}
-
-	function onSearchKey(e: KeyboardEvent) {
-		if (e.key === 'Escape') { e.preventDefault(); closeSearch(); return; }
-		if (e.key === 'Enter') { e.preventDefault(); commitSearch(); return; }
-		if (e.key === 'ArrowDown' || e.key === 'Tab') {
-			e.preventDefault();
-			const max = searchResults().length - 1;
-			searchSel = Math.min(searchSel + 1, max);
-			return;
-		}
-		if (e.key === 'ArrowUp') {
-			e.preventDefault();
-			searchSel = Math.max(searchSel - 1, 0);
-			return;
-		}
-	}
-
 	function onKeyNav(e: KeyboardEvent) {
-		if (showCmd) { if (e.key === 'Escape') closeCmd(); return; }
+		if (showCmd)    { if (e.key === 'Escape') closeCmd();    return; }
 		if (showSearch) { if (e.key === 'Escape') closeSearch(); return; }
-		const cur = focusId;
-		if (e.key === ':') { e.preventDefault(); openCmd(); return; }
+
+		if (e.key === ':') { e.preventDefault(); openCmd();    return; }
 		if (e.key === '/') { e.preventDefault(); openSearch(); return; }
 		if (e.key === '?') { showHelp = !showHelp; return; }
 		if (e.key === 'Escape') { showHelp = false; return; }
+
 		if (e.key === ' ') {
 			e.preventDefault();
-			if (birdseye) {
-				birdseye = false;
-				const returnTo = focusId ?? 0;
-				target = buildFocused(returnTo);
-			} else {
-				birdseye = true;
-				target = buildDefault();
-			}
+			birdseye = !birdseye;
+			target = birdseye ? buildDefault() : buildFocused(focusId ?? 0);
 			startAnim();
 			return;
 		}
+
 		if (!['h','j','k','l','H','J','K','L'].includes(e.key)) return;
 		e.preventDefault();
-		const from = cur ?? 0;
-		let next: number | null = null;
-		const fromDepth = depthOf(from);
-		const base = buildDefault();
-		const sameDepth = nodes
-			.filter(n => depthOf(n.id) === fromDepth)
-			.sort((a, b) => base[a.id].y - base[b.id].y)
-			.map(n => n.id);
-		const idx = sameDepth.indexOf(from);
 
-		if (e.key === 'l') {
-			const ch = getChildren(from);
-			if (ch.length > 0) next = ch[0];
-		} else if (e.key === 'L') {
-			let n = from;
-			while (getChildren(n).length > 0) n = getChildren(n)[0];
-			if (n !== from) next = n;
-		} else if (e.key === 'h') {
-			const par = getParents(from);
-			if (par.length > 0) next = par[0];
-		} else if (e.key === 'H') {
-			let n = from;
-			while (getParents(n).length > 0) n = getParents(n)[0];
-			if (n !== from) next = n;
-		} else if (e.key === 'j') {
-			if (idx < sameDepth.length - 1) next = sameDepth[idx + 1];
-		} else if (e.key === 'J') {
-			if (sameDepth.length > 0) next = sameDepth[sameDepth.length - 1];
-		} else if (e.key === 'k') {
-			if (idx > 0) next = sameDepth[idx - 1];
-		} else if (e.key === 'K') {
-			if (sameDepth.length > 0) next = sameDepth[0];
+		const from = focusId ?? 0;
+		const col = colAt(depthOf(from));
+		const idx = col.indexOf(from);
+		let next: number | null = null;
+
+		switch (e.key) {
+			case 'l': { const ch = getChildren(from); if (ch.length) next = ch[0]; break; }
+			case 'L': { let n = from; while (getChildren(n).length) n = getChildren(n)[0]; if (n !== from) next = n; break; }
+			case 'h': { const par = getParents(from); if (par.length) next = par[0]; break; }
+			case 'H': { let n = from; while (getParents(n).length) n = getParents(n)[0]; if (n !== from) next = n; break; }
+			case 'j': if (idx < col.length - 1) next = col[idx + 1]; break;
+			case 'J': next = col[col.length - 1]; break;
+			case 'k': if (idx > 0) next = col[idx - 1]; break;
+			case 'K': next = col[0]; break;
 		}
+
 		if (next !== null && next !== from) focusNode(next);
 	}
 
@@ -477,57 +279,133 @@
 	function onWheel(e: WheelEvent) {
 		e.preventDefault();
 		wheelAccum += e.deltaY;
-		const threshold = 60;
-		if (Math.abs(wheelAccum) < threshold) return;
-		const dir = wheelAccum > 0 ? 'j' : 'k';
+		if (Math.abs(wheelAccum) < 60) return;
+		const dir = wheelAccum > 0 ? 1 : -1;
 		wheelAccum = 0;
 		const from = focusId ?? 0;
-		const fromDepth = depthOf(from);
-		const base = buildDefault();
-		const sameDepth = nodes
-			.filter(n => depthOf(n.id) === fromDepth)
-			.sort((a, b) => base[a.id].y - base[b.id].y)
-			.map(n => n.id);
-		const idx = sameDepth.indexOf(from);
-		let next: number | null = null;
-		if (dir === 'j' && idx < sameDepth.length - 1) next = sameDepth[idx + 1];
-		else if (dir === 'k' && idx > 0) next = sameDepth[idx - 1];
-		if (next !== null) focusNode(next);
+		const col = colAt(depthOf(from));
+		const idx = col.indexOf(from);
+		const next = col[idx + dir];
+		if (next !== undefined) focusNode(next);
 	}
 
-	type EdgePath = {
-		parentId: number;
-		childId: number;
-		d: string;
-		opacity: number;
-		active: boolean;
-	};
+	// --- Search ---
+
+	function fuzzyMatch(query: string, str: string): boolean {
+		if (!query) return true;
+		const q = query.toLowerCase();
+		const s = str.toLowerCase();
+		let qi = 0;
+		for (let i = 0; i < s.length && qi < q.length; i++) {
+			if (s[i] === q[qi]) qi++;
+		}
+		return qi === q.length;
+	}
+
+	function searchResults() { return nodes.filter(n => fuzzyMatch(searchQuery, n.label)); }
+
+	function openSearch()  { showSearch = true;  searchQuery = ''; searchSel = 0; }
+	function closeSearch() { showSearch = false; searchQuery = ''; searchSel = 0; }
+
+	function commitSearch() {
+		const results = searchResults();
+		if (results[searchSel]) { birdseye = false; focusNode(results[searchSel].id); }
+		closeSearch();
+	}
+
+	function onSearchKey(e: KeyboardEvent) {
+		if (e.key === 'Escape')                          { e.preventDefault(); closeSearch(); return; }
+		if (e.key === 'Enter')                           { e.preventDefault(); commitSearch(); return; }
+		if (e.key === 'ArrowDown' || e.key === 'Tab')    { e.preventDefault(); searchSel = Math.min(searchSel + 1, searchResults().length - 1); return; }
+		if (e.key === 'ArrowUp')                         { e.preventDefault(); searchSel = Math.max(searchSel - 1, 0); return; }
+	}
+
+	// --- Command bar ---
+
+	function cmdSuggestions() {
+		const q = cmdInput.trim().toLowerCase();
+		return q ? CMD_REGISTRY.filter(c => fuzzyMatch(q, c.name) || fuzzyMatch(q, c.desc)) : CMD_REGISTRY;
+	}
+
+	function openCmd()  { showCmd = true;  cmdInput = ''; cmdError = ''; cmdSel = 0; }
+	function closeCmd() { showCmd = false; cmdInput = ''; cmdError = ''; cmdSel = 0; }
+
+	function runCmd(raw: string) {
+		const parts = raw.trim().split(/\s+/);
+		const cmd  = parts[0].toLowerCase();
+		const args = parts.slice(1).join(' ');
+		switch (cmd) {
+			case 'q': case 'quit':
+				closeCmd(); return;
+			case 'help':
+				closeCmd(); showHelp = true; return;
+			case 'bird': case 'birdeye': case 'birdseye':
+				closeCmd(); birdseye = true; target = buildDefault(); startAnim(); return;
+			case 'zoom':
+				closeCmd(); birdseye = false; target = buildFocused(focusId ?? 0); startAnim(); return;
+			case 'root':
+				closeCmd(); birdseye = false; focusNode(0); return;
+			case 'search':
+				closeCmd(); openSearch(); return;
+			case 'focus': {
+				if (!args) { cmdError = 'usage: focus <node name>'; return; }
+				const match = nodes.find(n => n.label.toLowerCase() === args.toLowerCase());
+				if (!match) { cmdError = `no node: "${args}"`; return; }
+				closeCmd(); birdseye = false; focusNode(match.id); return;
+			}
+			default:
+				cmdError = `unknown command: "${cmd}"`;
+		}
+	}
+
+	function onCmdKey(e: KeyboardEvent) {
+		const sugg = cmdSuggestions();
+		if (e.key === 'Escape') { e.preventDefault(); closeCmd(); return; }
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			if (sugg[cmdSel] && sugg[cmdSel].name !== cmdInput.trim()) {
+				const s = sugg[cmdSel];
+				cmdInput = s.name === 'focus' ? 'focus ' : s.name;
+				if (s.name !== 'focus') { runCmd(cmdInput); return; }
+			} else {
+				runCmd(cmdInput);
+			}
+			return;
+		}
+		if (e.key === 'Tab')       { e.preventDefault(); if (sugg.length) { const s = sugg[cmdSel]; cmdInput = s.name === 'focus' ? 'focus ' : s.name; cmdSel = 0; } return; }
+		if (e.key === 'ArrowUp')   { e.preventDefault(); cmdSel = Math.max(0, cmdSel - 1); return; }
+		if (e.key === 'ArrowDown') { e.preventDefault(); cmdSel = Math.min(cmdSel + 1, sugg.length - 1); return; }
+		cmdError = '';
+		cmdSel = 0;
+	}
+
+	// --- Connectors ---
+
+	type EdgePath = { parentId: number; childId: number; d: string; opacity: number; active: boolean };
 
 	function isConnectedToFocus(pid: number): boolean {
 		if (focusId === null) return true;
-		const children = getChildren(pid);
-		return pid === focusId || children.includes(focusId) ||
-			getParents(focusId).includes(pid) ||
-			children.some(c => getParents(focusId).includes(c)) ||
-			getParents(pid).some(p => p === focusId);
+		const ch = getChildren(pid);
+		return pid === focusId
+			|| ch.includes(focusId)
+			|| getParents(focusId).includes(pid)
+			|| ch.some(c => getParents(focusId).includes(c))
+			|| getParents(pid).some(p => p === focusId);
 	}
 
 	function buildConnectors(): EdgePath[] {
-		const paths: EdgePath[] = [];
-		for (const [pid, cid] of edges) {
-			const p = anim[pid];
-			const c = anim[cid];
-			const pW = tw(nodes[pid].label, p.fs) / 2;
-			const cW = tw(nodes[cid].label, c.fs) / 2;
-			const x1 = p.x + pW;
-			const x2 = c.x - cW;
+		return edges.map(([pid, cid]) => {
+			const p = anim[pid], c = anim[cid];
+			const x1 = p.x + tw(nodes[pid].label, p.fs) / 2;
+			const x2 = c.x - tw(nodes[cid].label, c.fs) / 2;
 			const midX = (x1 + x2) / 2;
-			const d = `M ${x1} ${p.y} H ${midX} V ${c.y} H ${x2}`;
-			const opacity = Math.min(p.opacity, c.opacity) * 0.85;
-			const active = isConnectedToFocus(pid);
-			paths.push({ parentId: pid, childId: cid, d, opacity, active });
-		}
-		return paths;
+			return {
+				parentId: pid, childId: cid,
+				d: `M ${x1} ${p.y} H ${midX} V ${c.y} H ${x2}`,
+				opacity: Math.min(p.opacity, c.opacity) * 0.85,
+				active: isConnectedToFocus(pid)
+			};
+		});
 	}
 </script>
 
@@ -544,35 +422,38 @@
 	<svg width="100%" height="100%" viewBox="-380 -220 760 440" preserveAspectRatio="xMidYMid meet">
 		<g>
 			{#each buildConnectors() as ep (`${ep.parentId}-${ep.childId}`)}
-				{@const stroke = ep.active ? '#555' : '#ccc'}
-				{@const sw = ep.active ? 1.2 : 0.6}
 				{@const bi = getChildren(ep.parentId).indexOf(ep.childId)}
-				<path class="connector" class:introduced d={ep.d} fill="none" stroke={stroke} stroke-width={sw} opacity={ep.opacity} pathLength="1" style="transition: stroke 0.3s, stroke-width 0.3s; animation-delay: {introSeq[`b-${ep.parentId}-${bi}`]}ms" />
+				<path
+					class="connector"
+					class:introduced
+					d={ep.d}
+					fill="none"
+					stroke={ep.active ? '#555' : '#ccc'}
+					stroke-width={ep.active ? 1.2 : 0.6}
+					opacity={ep.opacity}
+					pathLength="1"
+					style="transition: stroke 0.3s, stroke-width 0.3s; animation-delay: {introSeq[`b-${ep.parentId}-${bi}`]}ms"
+				/>
 			{/each}
-
 
 			{#each nodes as node}
 				{@const p = anim[node.id]}
-				{@const baseDelay = nodeIntroDelay(node.id)}
 				{#if focusId === node.id}
 					{@const pad = p.fs * 0.2}
 					{@const w = tw(node.label, p.fs) + pad * 2}
-					{@const h = p.fs * 1.1}
 					<rect
 						x={p.x - w / 2}
-						y={p.y - h / 2 - p.fs * 0.1}
+						y={p.y - p.fs * 1.1 / 2 - p.fs * 0.1}
 						width={w}
-						height={h}
-						rx={0}
+						height={p.fs * 1.1}
 						fill="#111"
 						opacity={p.opacity}
-				/>
+					/>
 				{/if}
 				<text
 					class="node-label"
 					class:focused={focusId === node.id}
-					x={p.x}
-					y={p.y}
+					x={p.x} y={p.y}
 					text-anchor="middle"
 					dominant-baseline="middle"
 					font-size={p.fs}
@@ -584,7 +465,7 @@
 				>{#each node.label.split('') as char, ci}<tspan
 						class="char"
 						class:introduced
-						style="animation-delay: {baseDelay + ci * CHAR_DUR}ms"
+						style="animation-delay: {nodeTextDelays[node.id] + ci * CHAR_DUR}ms"
 					>{char}</tspan>{/each}</text>
 			{/each}
 		</g>
@@ -604,7 +485,6 @@
 				<div class="search-input-row">
 					<span class="search-slash">/</span>
 					<input
-						bind:this={searchInput}
 						bind:value={searchQuery}
 						class="search-input"
 						placeholder="search nodes..."
@@ -649,7 +529,8 @@
 				</ul>
 			{/if}
 			<div class="cmd-input-row">
-				<span class="cmd-colon">:</span><input
+				<span class="cmd-colon">:</span>
+				<input
 					class="cmd-input"
 					bind:value={cmdInput}
 					autocomplete="off"
@@ -676,8 +557,8 @@
 						<tr><td>Space</td><td>Toggle bird's eye view</td></tr>
 						<tr><td>Scroll</td><td>Scroll current column</td></tr>
 						<tr><td>/</td><td>Fuzzy search nodes</td></tr>
-					<tr><td>:</td><td>Command bar</td></tr>
-					<tr><td>?</td><td>Toggle this help</td></tr>
+						<tr><td>:</td><td>Command bar</td></tr>
+						<tr><td>?</td><td>Toggle this help</td></tr>
 						<tr><td>Esc</td><td>Close help</td></tr>
 					</tbody>
 				</table>
@@ -688,41 +569,23 @@
 
 <style>
 	:global(body, html) {
-		margin: 0;
-		padding: 0;
-		width: 100%;
-		height: 100%;
+		margin: 0; padding: 0;
+		width: 100%; height: 100%;
 		overflow: hidden;
 		background: #e8e8e3;
 	}
 
-	.scene {
-		width: 100vw;
-		height: 100vh;
-		position: relative;
-	}
+	.scene { width: 100vw; height: 100vh; position: relative; }
 
-
-	@keyframes pop-in {
-		0%   { opacity: 0; }
-		100% { opacity: 1; }
-	}
-
-	@keyframes draw-in {
-		from { stroke-dashoffset: 1; }
-		to   { stroke-dashoffset: 0; }
-	}
-
+	@keyframes pop-in  { from { opacity: 0; } to { opacity: 1; } }
+	@keyframes draw-in { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
 
 	.char { opacity: 0; }
 	.char.introduced { animation: pop-in 0.05s steps(1) both; }
 
-	.connector:not(.introduced) { stroke-dasharray: 1; stroke-dashoffset: 1; opacity: 0; }
-	.connector.introduced {
-		stroke-dasharray: 1;
-		animation: draw-in 0.022s linear both;
-	}
 	.connector { stroke-linecap: butt; stroke-linejoin: miter; }
+	.connector:not(.introduced) { stroke-dasharray: 1; stroke-dashoffset: 1; opacity: 0; }
+	.connector.introduced { stroke-dasharray: 1; animation: draw-in 0.022s linear both; }
 
 	.node-label {
 		font-family: 'JetBrains Mono', monospace;
@@ -732,46 +595,12 @@
 		user-select: none;
 		outline: none;
 	}
-
-	.node-label:hover { fill: #222; }
+	.node-label:hover  { fill: #222; }
 	.node-label.focused { fill: #f0f0eb; font-weight: 800; }
-
-	.help-overlay {
-		position: fixed;
-		inset: 0;
-		background: rgba(0,0,0,0.25);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 10;
-	}
-
-	.help-box {
-		background: #e8e8e3;
-		border: 1px solid #ccc;
-		padding: 1.5rem 2rem;
-		font-family: 'JetBrains Mono', monospace;
-		font-size: 0.8rem;
-		color: #3a3a3a;
-		min-width: 18rem;
-	}
-
-	.help-title {
-		font-weight: 800;
-		font-size: 0.9rem;
-		margin-bottom: 1rem;
-		color: #111;
-	}
-
-	.help-box table { border-collapse: collapse; width: 100%; }
-	.help-box td { padding: 0.25rem 0.5rem; }
-	.help-box td:first-child { font-weight: 700; color: #111; white-space: nowrap; }
-	.help-box tr:hover td { background: rgba(0,0,0,0.05); }
 
 	.hint {
 		position: absolute;
-		top: 1rem;
-		left: 50%;
+		top: 1rem; left: 50%;
 		transform: translateX(-50%);
 		color: #888;
 		font-family: 'JetBrains Mono', monospace;
@@ -782,160 +611,77 @@
 		pointer-events: none;
 		backdrop-filter: blur(4px);
 	}
-
-	.hint-btn {
-		pointer-events: all;
-		cursor: pointer;
-		color: #555;
-	}
-
+	.hint-btn { pointer-events: all; cursor: pointer; color: #555; }
 	.hint-btn:hover { color: #222; }
 
+	.help-overlay {
+		position: fixed; inset: 0;
+		background: rgba(0,0,0,0.25);
+		display: flex; align-items: center; justify-content: center;
+		z-index: 10;
+	}
+	.help-box {
+		background: #e8e8e3;
+		border: 1px solid #ccc;
+		padding: 1.5rem 2rem;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 0.8rem;
+		color: #3a3a3a;
+		min-width: 18rem;
+	}
+	.help-title { font-weight: 800; font-size: 0.9rem; margin-bottom: 1rem; color: #111; }
+	.help-box table { border-collapse: collapse; width: 100%; }
+	.help-box td { padding: 0.25rem 0.5rem; }
+	.help-box td:first-child { font-weight: 700; color: #111; white-space: nowrap; }
+	.help-box tr:hover td { background: rgba(0,0,0,0.05); }
+
 	.search-overlay {
-		position: fixed;
-		inset: 0;
-		display: flex;
-		align-items: flex-start;
-		justify-content: center;
+		position: fixed; inset: 0;
+		display: flex; align-items: flex-start; justify-content: center;
 		padding-top: 15vh;
 		z-index: 20;
 		background: rgba(0,0,0,0.45);
 	}
-
 	.search-box {
 		width: 360px;
 		background: #1a1a1a;
 		border: 1px solid #444;
 		font-family: 'JetBrains Mono', monospace;
 	}
-
 	.search-input-row {
-		display: flex;
-		align-items: center;
+		display: flex; align-items: center;
 		border-bottom: 1px solid #333;
 		padding: 0 0.75rem;
 	}
-
-	.search-slash {
-		color: #666;
-		font-size: 0.9rem;
-		margin-right: 0.5rem;
-		user-select: none;
-	}
-
+	.search-slash { color: #666; font-size: 0.9rem; margin-right: 0.5rem; user-select: none; }
 	.search-input {
-		flex: 1;
-		background: transparent;
-		border: none;
-		outline: none;
-		color: #e8e8e3;
-		font-family: 'JetBrains Mono', monospace;
-		font-size: 0.85rem;
-		padding: 0.6rem 0;
-		caret-color: #e8e8e3;
+		flex: 1; background: transparent; border: none; outline: none;
+		color: #e8e8e3; font-family: 'JetBrains Mono', monospace;
+		font-size: 0.85rem; padding: 0.6rem 0; caret-color: #e8e8e3;
 	}
-
 	.search-input::placeholder { color: #555; }
-
-	.search-results {
-		list-style: none;
-		margin: 0;
-		padding: 0.25rem 0;
-		max-height: 240px;
-		overflow-y: auto;
-	}
-
-	.search-result {
-		padding: 0.4rem 1rem;
-		color: #aaa;
-		font-size: 0.82rem;
-		cursor: pointer;
-	}
-
-	.search-result.selected {
-		background: #2e2e2e;
-		color: #e8e8e3;
-	}
+	.search-results { list-style: none; margin: 0; padding: 0.25rem 0; max-height: 240px; overflow-y: auto; }
+	.search-result  { padding: 0.4rem 1rem; color: #aaa; font-size: 0.82rem; cursor: pointer; }
+	.search-result.selected { background: #2e2e2e; color: #e8e8e3; }
+	.search-empty   { padding: 0.4rem 1rem; color: #555; font-size: 0.82rem; font-style: italic; }
 
 	.cmd-bar {
-		position: fixed;
-		bottom: 0;
-		left: 0;
-		right: 0;
-		background: #1a1a1a;
-		border-top: 1px solid #444;
-		z-index: 20;
-		font-family: 'JetBrains Mono', monospace;
+		position: fixed; bottom: 0; left: 0; right: 0;
+		background: #1a1a1a; border-top: 1px solid #444;
+		z-index: 20; font-family: 'JetBrains Mono', monospace;
 	}
-
-	.cmd-suggestions {
-		list-style: none;
-		margin: 0;
-		padding: 0.25rem 0;
-		border-bottom: 1px solid #333;
-	}
-
-	.cmd-suggestion {
-		display: flex;
-		gap: 1rem;
-		padding: 0.3rem 0.75rem;
-		cursor: pointer;
-		color: #888;
-		font-size: 0.8rem;
-	}
-
-	.cmd-suggestion.selected {
-		background: #2e2e2e;
-		color: #e8e8e3;
-	}
-
-	.cmd-sname {
-		min-width: 5rem;
-		color: inherit;
-		font-weight: 600;
-	}
-
-	.cmd-suggestion.selected .cmd-sname { color: #e8e8e3; }
-
+	.cmd-suggestions { list-style: none; margin: 0; padding: 0.25rem 0; border-bottom: 1px solid #333; }
+	.cmd-suggestion  { display: flex; gap: 1rem; padding: 0.3rem 0.75rem; cursor: pointer; color: #888; font-size: 0.8rem; }
+	.cmd-suggestion.selected { background: #2e2e2e; color: #e8e8e3; }
+	.cmd-sname { min-width: 5rem; font-weight: 600; }
 	.cmd-sdesc { color: #555; font-size: 0.78rem; }
 	.cmd-suggestion.selected .cmd-sdesc { color: #aaa; }
-
-	.cmd-input-row {
-		display: flex;
-		align-items: center;
-		padding: 0.35rem 0.75rem;
-		gap: 0.1rem;
-	}
-
-	.cmd-colon {
-		color: #e8e8e3;
-		font-size: 0.85rem;
-		user-select: none;
-	}
-
+	.cmd-input-row { display: flex; align-items: center; padding: 0.35rem 0.75rem; gap: 0.1rem; }
+	.cmd-colon { color: #e8e8e3; font-size: 0.85rem; user-select: none; }
 	.cmd-input {
-		flex: 1;
-		background: transparent;
-		border: none;
-		outline: none;
-		color: #e8e8e3;
-		font-family: 'JetBrains Mono', monospace;
-		font-size: 0.85rem;
-		caret-color: #e8e8e3;
-		padding: 0;
+		flex: 1; background: transparent; border: none; outline: none;
+		color: #e8e8e3; font-family: 'JetBrains Mono', monospace;
+		font-size: 0.85rem; caret-color: #e8e8e3; padding: 0;
 	}
-
-	.cmd-error {
-		color: #e06c75;
-		font-family: 'JetBrains Mono', monospace;
-		font-size: 0.8rem;
-		margin-left: 1rem;
-	}
-
-	.search-empty {
-		padding: 0.4rem 1rem;
-		color: #555;
-		font-size: 0.82rem;
-		font-style: italic;
-	}
+	.cmd-error { color: #e06c75; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; margin-left: 1rem; }
 </style>
