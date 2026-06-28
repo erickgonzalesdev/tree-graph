@@ -1,33 +1,37 @@
 # Tree Graph — AI Context
 
 ## What This Is
-A SvelteKit + SVG interactive 3-layer tree graph. No 3D library — pure SVG rendering with Svelte 5 runes.
+A SvelteKit + SVG interactive tree graph backed by a real filesystem. No 3D library — pure SVG rendering with Svelte 5 runes. Each node corresponds to a directory under `content/`.
 
 ## Stack
-- **SvelteKit** (Svelte 5 runes: `$state`)
-- **Pure SVG** for rendering (Threlte/Three.js was tried and removed)
+- **SvelteKit** (Svelte 5 runes: `$state`, `$derived`, `tick`)
+- **Pure SVG** for rendering
 - **TypeScript**
 - **JetBrains Mono** via Google Fonts
-- Single file: `src/routes/+page.svelte`
+- Main UI: `src/routes/+page.svelte`
+- API: `src/routes/api/nodes/+server.ts`
 
-## Tree Structure
-```
-Node 1 → Node 2, Node 3
-Node 2 → Node 4, Node 5
-Node 3 → Node 6, Node 7
-```
-Node IDs: 0=Node1, 1=Node2, 2=Node3, 3=Node4, 4=Node5, 5=Node6, 6=Node7
+## Filesystem Structure
+- `content/` is the root directory; its children are the top-level nodes
+- `content/` itself is never emitted as a node — the API scans its children directly
+- Node IDs are path-based: `node-1|node-2|node-4` (slashes replaced with `|`)
+- Node paths are relative to `content/`: `/node-1/node-2/node-4`
+
+## API (`/api/nodes`)
+- `GET` — scans `content/` recursively, returns `{ nodes, edges }`. Root node (`content/`) is excluded.
+- `POST { parentPath, name }` — creates a new subdirectory
+- `PATCH { path, newName }` — renames a directory
+- `DELETE { path }` — removes a directory recursively
 
 ## Features
-- Starts focused on Node 1
+- Starts focused on root node
 - Click a node to focus it — centers, grows larger, related nodes visible in periphery
 - Click focused node again to unfocus
 - Font size encodes depth: left (root) = larger, right (leaves) = smaller
-- Focused node gets biggest font; ancestors grow, descendants shrink by `FS_STEP` per depth level
+- Focused node gets biggest font; ancestors/descendants scale by `FS_STEP` per depth level
 - Layout scales `1.3×` on focus for a zoom-in feel
-- Each edge rendered as a single L-shaped `<path>`: `M x1 y1 H midX V y2 H x2` — no shared segments, no overlap artifacts at corners
 - Smooth lerp animation via `requestAnimationFrame`
-- Focused node renders a dark highlight rect behind the label (sharp corners, `#111` fill)
+- Focused node renders a dark highlight rect behind the label (`#111` fill, sharp corners)
 - Light/warm theme (`#e8e8e3` background), muted greys, no color accents
 - Active/inactive line coloring: connected-to-focus lines are `#555` 1.2px, others `#ccc` 0.6px
 
@@ -38,9 +42,13 @@ Node IDs: 0=Node1, 1=Node2, 2=Node3, 3=Node4, 4=Node5, 5=Node6, 6=Node7
 - `k` — move to previous node at same depth (up)
 - `H/L` — jump to root / deepest descendant
 - `J/K` — jump to bottom / top of current column
-- `Space` — toggle bird's eye view (full tree) / zoomed view; returns to last focused node
+- `o` — create sibling node (same column) with inline rename prompt
+- `O` — create child node (next column) with inline rename prompt
+- `x` — delete focused node (prompts confirmation; Enter to confirm, Escape to cancel)
+- `Space` — toggle bird's eye view (full tree) / zoomed view
 - In bird's eye, `hjkl` updates selected node without zooming in — Space zooms into selection
 - `/` — open fuzzy search overlay
+- `:` — open vim-style command bar
 - `?` — toggle help popup
 - `Scroll` — scroll current column (j/k direction)
 
@@ -50,28 +58,54 @@ FS_BASE  = 11   // default font size at depth 0
 FS_STEP  = 4    // font size drop per depth level (default) / change per depth in focused mode
 FS_FOCUS = 18   // font size of focused node
 FS_MIN   = 5    // minimum font size
-ROW_H    = 40   // vertical spacing between sibling nodes
+ROW_H    = 40   // vertical spacing between sibling nodes (default view)
 COL_GAP  = 70   // horizontal spacing between depth columns
 scale    = 1.3  // position spread multiplier when focused (in buildFocused)
 SEG_DUR  = 22   // ms per intro line segment
 CHAR_DUR = 12   // ms per character in typewriter intro effect
 ```
+Bird's eye view uses tighter spacing: `rowH=24, colGap=45`.
 
 ## Layout Algorithm
-- **`buildDefault()`**: Reingold-Tilford style. Leaves get sequential Y slots. Parents centered between first/last child Y. Depth → X. Guarantees no edge crossings.
-- **`buildFocused(fid)`**: Reuses `buildDefault` positions, shifts so focused node is at (0,0), scales positions by `1.3×`, assigns font size by depth delta from focused node.
+- **`buildDefault(rowH, colGap)`**: Equal-slot subtree algorithm. `subtreeH(id)` computes the vertical span a subtree needs (max child subtreeH × child count). Each child gets an equal slot = max sibling subtreeH. This guarantees parent Y always equals the trunk midpoint (no off-center connectors). Depth → X.
+- **`buildFocused(fid)`**: Reuses `buildDefault` positions, shifts so focused node is at (0,0), scales by `1.3×`, assigns font size by depth delta from focused node.
 - **`depthOf(id)`**: Returns tree depth of a node (0 = root).
 - **`fsForDepth(depth)`**: Returns font size for a given absolute depth.
-- **`getDistance(a, b)`**: BFS distance between any two nodes (traverses edges bidirectionally).
 
 ## Connector Rendering
-**`buildConnectors()`** returns `EdgePath[]` — one per edge:
-- Each edge is a single L-shaped path: `M x1 y1 H midX V y2 H x2`
-- No shared segments between sibling edges — eliminates all T-joint overlap artifacts
+**`buildConnectors()`** returns `Connector[]` — trunk + branch per parent:
+- **Trunk**: one path per parent node. `M px1 p.y H mx V trunkY1 M mx p.y V trunkY2` — H line from parent to trunk X, then vertical spans up and down to first/last child Y.
+- **Branch**: one `M mx c.y H cx2` per child — horizontal from trunk to child label edge.
 - `active` flag: true if edge is connected to currently focused node
 - `pathLength="1"` + `stroke-dashoffset` used for draw-in animation
 
 No diagonals ever. Lines are axis-aligned in all states.
+
+## Node Creation
+- `o` key calls `createSiblingNode()`, `O` key calls `createChildNode()`
+- Generates a unique temp name (`new-node`, `new-node-1`, etc.) to avoid 409 conflicts
+- Creates the directory via POST, then `loadTree()` + `tick()` to flush DOM, then shows inline rename
+- `renamingIsNew = true` flag distinguishes new-node rename from regular rename
+- Inline rename: `<foreignObject>` sized dynamically to fit current input value
+- Enter with unchanged name → keeps directory as-is (no rename API call)
+- Enter with new name → renames directory via PATCH
+- Escape → deletes the temp directory via DELETE and refocuses parent
+
+## Inline Rename State
+```ts
+let renamingId    = $state<string | null>(null);
+let renameValue   = $state('');
+let renamingIsNew = $state(false);
+```
+- `startRename(id, label, isNew?)` — sets all three
+- `commitRename()` — renames if name changed; if `renamingIsNew` and name unchanged, just closes (keeps node)
+- `cancelRename()` — closes; if `renamingIsNew`, deletes directory and refocuses parent
+
+## Delete Node
+- `x` key sets `confirmDeleteId` to show confirmation dialog
+- Enter in `onKeyNav` while `confirmDeleteId` is set confirms deletion
+- Escape cancels; clicking Cancel button cancels
+- Deletes directory recursively via DELETE API, reloads tree, focuses parent
 
 ## Focus Highlight
 Focused node renders a `<rect>` behind the `<text>`:
@@ -86,10 +120,11 @@ Sequential left→right, top→bottom reveal:
 - `introduced` state flips on mount via `requestAnimationFrame`, triggering all CSS animations simultaneously (delays handle sequencing).
 
 ## State
-- `focusId` — currently focused node id (starts at `0`)
+- `focusId` — currently focused node id
 - `birdseye` — boolean, true when in bird's eye overview mode
 - `introduced` — boolean, flips true on mount to trigger intro animations
 - `showHelp` — boolean, toggles help overlay
+- `confirmDeleteId` — node id pending delete confirmation, or null
 - `target` — the layout positions being animated toward
 - `anim` — current interpolated positions (reactive `$state`)
 
@@ -103,10 +138,12 @@ Sequential left→right, top→bottom reveal:
 - No line crossings in any focus state
 - All nodes visible in periphery when focused
 - No focus outline on click (suppressed via `outline: none`)
-- Single `<path>` per edge — no overlap artifacts at line corners
+- Trunk connector H line always meets trunk at exact visual center between children (equal-slot layout guarantees this)
 - Bird's eye / zoom toggle works correctly with keyboard navigation
 - Typewriter intro: left→right per node, top→bottom per column, one column at a time
 - Rofi-style fuzzy search: `/` key or clicking "/ search" in hint bar opens dark overlay; type to filter, `↑/↓`/`Tab` to select, `Enter` to jump, `Escape` or click outside to close
+- Node creation: `o`/`O` keys create nodes with unique temp names, inline rename prompt, Escape cancels and deletes temp dir
+- Delete: `x` key with confirmation dialog, Enter to confirm, Escape to cancel
 
 ## Fuzzy Search
 - `showSearch` state toggles overlay
@@ -142,8 +179,7 @@ Sequential left→right, top→bottom reveal:
 | `q` / `quit` | Close command bar |
 
 ## Possible Next Steps
-- Add more nodes / deeper tree
 - Add labels or metadata to nodes
-- Make tree data dynamic/editable
 - Add pan/zoom via pointer events
 - Persist focus state in URL
+- Support moving nodes (drag or cut/paste)

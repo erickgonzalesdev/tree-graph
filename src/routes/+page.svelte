@@ -1,30 +1,10 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 
-	// --- Data ---
+	// --- Types ---
 
-	const nodes = [
-		{ id: 0, label: 'Node 1' },
-		{ id: 1, label: 'Node 2' },
-		{ id: 2, label: 'Node 3' },
-		{ id: 3, label: 'Node 4' },
-		{ id: 4, label: 'Node 5' },
-		{ id: 5, label: 'Node 6' },
-		{ id: 6, label: 'Node 7' }
-	];
-
-	const edges: [number, number][] = [
-		[0, 1], [0, 2],
-		[1, 3], [1, 4],
-		[2, 5], [2, 6]
-	];
-
-	function getChildren(id: number) {
-		return edges.filter(([a]) => a === id).map(([, b]) => b);
-	}
-	function getParents(id: number) {
-		return edges.filter(([, b]) => b === id).map(([a]) => a);
-	}
+	type Node    = { id: string; label: string; path: string };
+	type NodePos = { x: number; y: number; fs: number; opacity: number };
 
 	// --- Constants ---
 
@@ -48,9 +28,69 @@
 		{ name: 'q',      desc: "close command bar" },
 	];
 
-	// --- Types ---
+	// --- Reactive tree data ---
 
-	type NodePos = { x: number; y: number; fs: number; opacity: number };
+	let nodes = $state<Node[]>([]);
+	let edges = $state<[string, string][]>([]);
+
+	function getChildren(id: string) {
+		return edges.filter(([a]) => a === id).map(([, b]) => b);
+	}
+	function getParents(id: string) {
+		return edges.filter(([, b]) => b === id).map(([a]) => a);
+	}
+
+	function rootId(): string {
+		return nodes.find(n => getParents(n.id).length === 0)?.id ?? '';
+	}
+
+	// --- API ---
+
+	async function loadTree() {
+		const res = await fetch('/api/nodes');
+		const data = await res.json();
+		nodes = data.nodes;
+		edges = data.edges;
+		const rid = rootId();
+		if (!rid) return;
+		const fid = focusId ?? rid;
+		if (focusId === null) focusId = rid;
+		target = buildFocused(fid);
+		// Preserve existing anim positions; snap new nodes directly to target
+		const next: Record<string, NodePos> = {};
+		nodes.forEach(n => {
+			next[n.id] = anim[n.id] ?? { ...target[n.id] };
+		});
+		anim = next;
+		startAnim();
+	}
+
+	async function apiCreateNode(parentPath: string, name: string): Promise<boolean> {
+		const res = await fetch('/api/nodes', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ parentPath, name })
+		});
+		return res.ok;
+	}
+
+	async function apiDeleteNode(path: string): Promise<boolean> {
+		const res = await fetch('/api/nodes', {
+			method: 'DELETE',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ path })
+		});
+		return res.ok;
+	}
+
+	async function apiRenameNode(path: string, newName: string): Promise<boolean> {
+		const res = await fetch('/api/nodes', {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ path, newName })
+		});
+		return res.ok;
+	}
 
 	// --- Layout helpers ---
 
@@ -58,7 +98,7 @@
 		return label.length * CHAR_W * fs;
 	}
 
-	function depthOf(id: number): number {
+	function depthOf(id: string): number {
 		const parents = getParents(id);
 		return parents.length === 0 ? 0 : 1 + depthOf(parents[0]);
 	}
@@ -67,31 +107,29 @@
 		return Math.max(FS_MIN, FS_BASE - depth * FS_STEP);
 	}
 
-	function buildDefault(): Record<number, NodePos> {
-		const COL_W = tw('Node X', FS_BASE) + COL_GAP;
-		const result: Record<number, NodePos> = {};
+	function buildDefault(rowH = ROW_H, colGap = COL_GAP): Record<string, NodePos> {
+		if (nodes.length === 0) return {};
+		const COL_W = tw('Node X', FS_BASE) + colGap;
+		const result: Record<string, NodePos> = {};
+		const rid = rootId();
 
-		let leafIndex = 0;
-		const leafSlot: Record<number, number> = {};
-		function assignLeaves(id: number) {
+		// Compute the vertical span a subtree needs, ensuring siblings get equal slots
+		function subtreeH(id: string): number {
 			const ch = getChildren(id);
-			if (ch.length === 0) leafSlot[id] = leafIndex++;
-			else ch.forEach(c => assignLeaves(c));
+			if (ch.length === 0) return rowH;
+			const maxChildH = Math.max(...ch.map(c => subtreeH(c)));
+			return ch.length * maxChildH;
 		}
-		assignLeaves(0);
 
-		function getY(id: number): number {
+		function place(id: string, depth: number, y: number) {
+			result[id] = { x: depth * COL_W, y, fs: fsForDepth(depth), opacity: 1 };
 			const ch = getChildren(id);
-			if (ch.length === 0) return leafSlot[id] * ROW_H;
-			const ys = ch.map(c => getY(c));
-			return (ys[0] + ys[ys.length - 1]) / 2;
+			if (ch.length === 0) return;
+			const slot = Math.max(...ch.map(c => subtreeH(c)));
+			const totalH = (ch.length - 1) * slot;
+			ch.forEach((c, i) => place(c, depth + 1, y - totalH / 2 + i * slot));
 		}
-
-		function place(id: number, depth: number) {
-			result[id] = { x: depth * COL_W, y: getY(id), fs: fsForDepth(depth), opacity: 1 };
-			getChildren(id).forEach(c => place(c, depth + 1));
-		}
-		place(0, 0);
+		place(rid, 0, 0);
 
 		const xs = Object.values(result).map(p => p.x);
 		const ys = Object.values(result).map(p => p.y);
@@ -101,13 +139,14 @@
 		return result;
 	}
 
-	function buildFocused(fid: number): Record<number, NodePos> {
+	function buildFocused(fid: string): Record<string, NodePos> {
 		const base = buildDefault();
+		if (!base[fid]) return base;
 		const fx = base[fid].x;
 		const fy = base[fid].y;
 		const focusDepth = depthOf(fid);
 		const scale = 1.3;
-		const result: Record<number, NodePos> = {};
+		const result: Record<string, NodePos> = {};
 		nodes.forEach(n => {
 			const depthDelta = depthOf(n.id) - focusDepth;
 			const absDelta = Math.abs(depthDelta);
@@ -121,21 +160,21 @@
 		return result;
 	}
 
-	// Returns node IDs at a given depth, sorted top-to-bottom
-	function colAt(depth: number): number[] {
+	function colAt(depth: number): string[] {
 		const base = buildDefault();
 		return nodes
 			.filter(n => depthOf(n.id) === depth)
-			.sort((a, b) => base[a.id].y - base[b.id].y)
+			.sort((a, b) => (base[a.id]?.y ?? 0) - (base[b.id]?.y ?? 0))
 			.map(n => n.id);
 	}
 
 	// --- Intro animation ---
 
 	function buildIntroSequence(): Record<string, number> {
+		if (nodes.length === 0) return {};
 		const delays: Record<string, number> = {};
 		let t = 0;
-		function walk(pid: number) {
+		function walk(pid: string) {
 			const children = getChildren(pid);
 			if (children.length === 0) return;
 			delays[`h-${pid}`] = t; t += SEG_DUR;
@@ -145,19 +184,20 @@
 				walk(cid);
 			});
 		}
-		walk(0);
+		walk(rootId());
 		return delays;
 	}
 
-	function buildNodeTextDelays(): Record<number, number> {
+	function buildNodeTextDelays(): Record<string, number> {
+		if (nodes.length === 0) return {};
 		const base = buildDefault();
 		const maxDepth = Math.max(...nodes.map(n => depthOf(n.id)));
-		const delays: Record<number, number> = {};
+		const delays: Record<string, number> = {};
 		let colStart = 0;
 		for (let depth = 0; depth <= maxDepth; depth++) {
 			const col = nodes
 				.filter(n => depthOf(n.id) === depth)
-				.sort((a, b) => base[a.id].y - base[b.id].y);
+				.sort((a, b) => (base[a.id]?.y ?? 0) - (base[b.id]?.y ?? 0));
 			let t = colStart;
 			for (const n of col) {
 				delays[n.id] = t;
@@ -168,27 +208,27 @@
 		return delays;
 	}
 
-	const introSeq = buildIntroSequence();
-	const nodeTextDelays = buildNodeTextDelays();
+	// Recomputed whenever nodes/edges change
+	let introSeq     = $derived(buildIntroSequence());
+	let nodeTextDelays = $derived(buildNodeTextDelays());
 
 	// --- Animation ---
 
 	function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
 
-	let target: Record<number, NodePos> = buildFocused(0);
-	let anim: Record<number, NodePos> = $state(
-		nodes.reduce((acc, n) => { acc[n.id] = { ...target[n.id] }; return acc; }, {} as Record<number, NodePos>)
-	);
-	let rafId = 0;
+	let target = $state<Record<string, NodePos>>({});
+	let anim   = $state<Record<string, NodePos>>({});
+	let rafId  = 0;
 
 	function startAnim() {
 		cancelAnimationFrame(rafId);
 		const step = () => {
 			let moving = false;
-			const next: Record<number, NodePos> = {};
+			const next: Record<string, NodePos> = {};
 			nodes.forEach(n => {
-				const a = anim[n.id];
+				const a = anim[n.id] ?? target[n.id];
 				const t = target[n.id];
+				if (!a || !t) return;
 				const nx = lerp(a.x, t.x, 0.1);
 				const ny = lerp(a.y, t.y, 0.1);
 				next[n.id] = { x: nx, y: ny, fs: lerp(a.fs, t.fs, 0.1), opacity: lerp(a.opacity, t.opacity, 0.1) };
@@ -202,7 +242,7 @@
 
 	// --- State ---
 
-	let focusId  = $state<number | null>(0);
+	let focusId  = $state<string | null>(null);
 	let birdseye = $state(false);
 	let showHelp = $state(false);
 	let showSearch  = $state(false);
@@ -214,18 +254,30 @@
 	let cmdSel   = $state(0);
 	let introduced = $state(false);
 
-	onMount(() => { requestAnimationFrame(() => { introduced = true; }); });
+	// Inline rename state
+	let renamingId    = $state<string | null>(null);
+	let renameValue   = $state('');
+	let renamingIsNew = $state(false);
+
+	// Delete confirm state
+	let confirmDeleteId = $state<string | null>(null);
+
+	onMount(async () => {
+		await loadTree();
+		requestAnimationFrame(() => { introduced = true; });
+	});
 
 	function focusOnMount(el: HTMLElement) { setTimeout(() => el.focus(), 0); }
 
 	// --- Navigation ---
 
-	function focusNode(id: number) {
+	function focusNode(id: string) {
 		focusId = id;
 		if (!birdseye) { target = buildFocused(id); startAnim(); }
 	}
 
-	function onClickNode(id: number) {
+	function onClickNode(id: string) {
+		if (renamingId) return;
 		birdseye = false;
 		if (focusId === id) {
 			focusId = null;
@@ -236,19 +288,142 @@
 		startAnim();
 	}
 
+	// --- Node creation & rename ---
+
+	async function createSiblingNode() {
+		const cur = focusId ?? rootId();
+		const curNode = nodes.find(n => n.id === cur);
+		if (!curNode) return;
+
+		const parents = getParents(cur);
+		const parentNode = parents.length > 0
+			? nodes.find(n => n.id === parents[0])
+			: null;
+
+		const targetPath = parentNode ? parentNode.path : curNode.path.split('/').slice(0, -1).join('/') || '/';
+		const dirPath = targetPath === '/' ? '' : targetPath;
+		let tempName = 'new-node';
+		let suffix = 1;
+		while (nodes.some(n => n.path === `${targetPath}/${tempName}` || (targetPath === '/' && n.path === `/${tempName}`))) {
+			tempName = `new-node-${suffix++}`;
+		}
+		const ok = await apiCreateNode(dirPath, tempName);
+		if (!ok) return;
+
+		await loadTree();
+		await tick();
+
+		const expectedPath = targetPath === '/' ? `/${tempName}` : `${targetPath}/${tempName}`;
+		const newNode = nodes.find(n => n.path === expectedPath);
+		if (newNode) {
+			focusNode(newNode.id);
+			await tick();
+			startRename(newNode.id, newNode.label, true);
+		}
+	}
+
+	async function createChildNode() {
+		const parentId = focusId ?? rootId();
+		const parent = nodes.find(n => n.id === parentId);
+		if (!parent) return;
+
+		let tempName = 'new-node';
+		let suffix = 1;
+		while (nodes.some(n => n.path === `${parent.path}/${tempName}`)) {
+			tempName = `new-node-${suffix++}`;
+		}
+		const ok = await apiCreateNode(parent.path, tempName);
+		if (!ok) return;
+
+		await loadTree();
+		await tick();
+
+		const newNode = nodes.find(n => n.path === `${parent.path}/${tempName}`);
+		if (newNode) {
+			focusNode(newNode.id);
+			await tick();
+			startRename(newNode.id, newNode.label, true);
+		}
+	}
+
+	function startRename(id: string, currentLabel: string, isNew = false) {
+		renamingId    = id;
+		renameValue   = currentLabel;
+		renamingIsNew = isNew;
+	}
+
+	async function commitRename() {
+		if (!renamingId) return;
+		const node = nodes.find(n => n.id === renamingId);
+		const newName = renameValue.trim();
+		if (!node || !newName) { cancelRename(); return; }
+		if (newName === node.label && !renamingIsNew) { cancelRename(); return; }
+		if (newName === node.label && renamingIsNew) { renamingId = null; renameValue = ''; renamingIsNew = false; return; }
+		const ok = await apiRenameNode(node.path, newName);
+		renamingId = null;
+		renameValue = '';
+		renamingIsNew = false;
+		if (ok) await loadTree();
+	}
+
+	function cancelRename() {
+		const id = renamingId;
+		const isNew = renamingIsNew;
+		renamingId    = null;
+		renameValue   = '';
+		renamingIsNew = false;
+		if (isNew && id) {
+			const node = nodes.find(n => n.id === id);
+			if (node) {
+				const parent = getParents(id)[0] ?? rootId();
+				apiDeleteNode(node.path).then(() => loadTree()).then(() => focusNode(parent));
+			}
+		}
+	}
+
 	function onKeyNav(e: KeyboardEvent) {
+		if (renamingId) return;
 		if (showCmd)    { if (e.key === 'Escape') closeCmd();    return; }
 		if (showSearch) { if (e.key === 'Escape') closeSearch(); return; }
 
 		if (e.key === ':') { e.preventDefault(); openCmd();    return; }
 		if (e.key === '/') { e.preventDefault(); openSearch(); return; }
 		if (e.key === '?') { showHelp = !showHelp; return; }
-		if (e.key === 'Escape') { showHelp = false; return; }
+		if (e.key === 'Escape') { showHelp = false; confirmDeleteId = null; return; }
+
+		if (confirmDeleteId) {
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				const node = nodes.find(n => n.id === confirmDeleteId);
+				confirmDeleteId = null;
+				if (node) {
+					const parent = getParents(node.id)[0] ?? rootId();
+					apiDeleteNode(node.path).then(() => loadTree()).then(() => focusNode(parent));
+				}
+			}
+			return;
+		}
+
+		if (e.key === 'x') {
+			e.preventDefault();
+			if (focusId && focusId !== rootId()) confirmDeleteId = focusId;
+			return;
+		}
+		if (e.key === 'o') {
+			e.preventDefault();
+			createSiblingNode();
+			return;
+		}
+		if (e.key === 'O') {
+			e.preventDefault();
+			createChildNode();
+			return;
+		}
 
 		if (e.key === ' ') {
 			e.preventDefault();
 			birdseye = !birdseye;
-			target = birdseye ? buildDefault() : buildFocused(focusId ?? 0);
+			target = birdseye ? buildDefault(24, 45) : buildFocused(focusId ?? rootId());
 			startAnim();
 			return;
 		}
@@ -256,10 +431,10 @@
 		if (!['h','j','k','l','H','J','K','L'].includes(e.key)) return;
 		e.preventDefault();
 
-		const from = focusId ?? 0;
+		const from = focusId ?? rootId();
 		const col = colAt(depthOf(from));
 		const idx = col.indexOf(from);
-		let next: number | null = null;
+		let next: string | null = null;
 
 		switch (e.key) {
 			case 'l': { const ch = getChildren(from); if (ch.length) next = ch[0]; break; }
@@ -282,7 +457,7 @@
 		if (Math.abs(wheelAccum) < 60) return;
 		const dir = wheelAccum > 0 ? 1 : -1;
 		wheelAccum = 0;
-		const from = focusId ?? 0;
+		const from = focusId ?? rootId();
 		const col = colAt(depthOf(from));
 		const idx = col.indexOf(from);
 		const next = col[idx + dir];
@@ -340,11 +515,11 @@
 			case 'help':
 				closeCmd(); showHelp = true; return;
 			case 'bird': case 'birdeye': case 'birdseye':
-				closeCmd(); birdseye = true; target = buildDefault(); startAnim(); return;
+				closeCmd(); birdseye = true; target = buildDefault(24, 45); startAnim(); return;
 			case 'zoom':
-				closeCmd(); birdseye = false; target = buildFocused(focusId ?? 0); startAnim(); return;
+				closeCmd(); birdseye = false; target = buildFocused(focusId ?? rootId()); startAnim(); return;
 			case 'root':
-				closeCmd(); birdseye = false; focusNode(0); return;
+				closeCmd(); birdseye = false; focusNode(rootId()); return;
 			case 'search':
 				closeCmd(); openSearch(); return;
 			case 'focus': {
@@ -381,9 +556,11 @@
 
 	// --- Connectors ---
 
-	type EdgePath = { parentId: number; childId: number; d: string; opacity: number; active: boolean };
+	type Connector =
+		| { kind: 'trunk'; parentId: string; d: string; opacity: number; active: boolean }
+		| { kind: 'branch'; parentId: string; childId: string; d: string; opacity: number; active: boolean };
 
-	function isConnectedToFocus(pid: number): boolean {
+	function isConnectedToFocus(pid: string): boolean {
 		if (focusId === null) return true;
 		const ch = getChildren(pid);
 		return pid === focusId
@@ -393,19 +570,56 @@
 			|| getParents(pid).some(p => p === focusId);
 	}
 
-	function buildConnectors(): EdgePath[] {
-		return edges.map(([pid, cid]) => {
-			const p = anim[pid], c = anim[cid];
-			const x1 = p.x + tw(nodes[pid].label, p.fs) / 2;
-			const x2 = c.x - tw(nodes[cid].label, c.fs) / 2;
-			const midX = (x1 + x2) / 2;
-			return {
-				parentId: pid, childId: cid,
-				d: `M ${x1} ${p.y} H ${midX} V ${c.y} H ${x2}`,
-				opacity: Math.min(p.opacity, c.opacity) * 0.85,
-				active: isConnectedToFocus(pid)
-			};
-		});
+	function buildConnectors(): Connector[] {
+		const result: Connector[] = [];
+		const parentIds = [...new Set(edges.map(([pid]) => pid))];
+
+		for (const pid of parentIds) {
+			const p = anim[pid];
+			if (!p) continue;
+			const children = getChildren(pid);
+			if (!children.length) continue;
+
+			const pLabel = nodes.find(n => n.id === pid)?.label ?? '';
+			const px1 = p.x + tw(pLabel, p.fs) / 2;
+
+			// trunk X = midpoint between parent center and children column center
+			const firstC = anim[children[0]];
+			if (!firstC) continue;
+			const mx = (p.x + firstC.x) / 2;
+
+			const childYs = children.map(cid => anim[cid]?.y).filter((y): y is number => y !== undefined);
+			const trunkY1 = Math.min(...childYs);
+			const trunkY2 = Math.max(...childYs);
+			const active = isConnectedToFocus(pid);
+			const pOpacity = p.opacity;
+
+			const trunkD = trunkY1 === trunkY2
+				? `M ${px1} ${p.y} H ${mx}`
+				: `M ${px1} ${p.y} H ${mx} V ${trunkY1} M ${mx} ${p.y} V ${trunkY2}`;
+			result.push({
+				kind: 'trunk', parentId: pid,
+				d: trunkD,
+				opacity: pOpacity * 0.85,
+				active
+			});
+
+			// branch from trunk to each child
+			for (const cid of children) {
+				const c = anim[cid];
+				if (!c) continue;
+				const cLabel = nodes.find(n => n.id === cid)?.label ?? '';
+				const cx2 = c.x - tw(cLabel, c.fs) / 2;
+				const opacity = Math.min(p.opacity, c.opacity) * 0.85;
+				result.push({
+					kind: 'branch', parentId: pid, childId: cid,
+					d: `M ${mx} ${c.y} H ${cx2}`,
+					opacity,
+					active
+				});
+			}
+		}
+		return result;
 	}
 </script>
 
@@ -421,8 +635,10 @@
 <div class="scene" onwheel={onWheel}>
 	<svg width="100%" height="100%" viewBox="-380 -220 760 440" preserveAspectRatio="xMidYMid meet">
 		<g>
-			{#each buildConnectors() as ep (`${ep.parentId}-${ep.childId}`)}
-				{@const bi = getChildren(ep.parentId).indexOf(ep.childId)}
+			{#each buildConnectors() as ep (ep.kind === 'trunk' ? `trunk-${ep.parentId}` : `branch-${ep.parentId}-${ep.childId}`)}
+				{@const delay = ep.kind === 'trunk'
+					? (introSeq[`trunk-${ep.parentId}`] ?? introSeq[`h-${ep.parentId}`] ?? 0)
+					: (introSeq[`b-${ep.parentId}-${getChildren(ep.parentId).indexOf(ep.childId)}`] ?? 0)}
 				<path
 					class="connector"
 					class:introduced
@@ -432,41 +648,65 @@
 					stroke-width={ep.active ? 1.2 : 0.6}
 					opacity={ep.opacity}
 					pathLength="1"
-					style="transition: stroke 0.3s, stroke-width 0.3s; animation-delay: {introSeq[`b-${ep.parentId}-${bi}`]}ms"
+					style="transition: stroke 0.3s, stroke-width 0.3s; animation-delay: {delay}ms"
 				/>
 			{/each}
 
 			{#each nodes as node}
 				{@const p = anim[node.id]}
-				{#if focusId === node.id}
-					{@const pad = p.fs * 0.2}
-					{@const w = tw(node.label, p.fs) + pad * 2}
-					<rect
-						x={p.x - w / 2}
-						y={p.y - p.fs * 1.1 / 2 - p.fs * 0.1}
-						width={w}
-						height={p.fs * 1.1}
-						fill="#111"
-						opacity={p.opacity}
-					/>
+				{#if p}
+					{#if focusId === node.id}
+						{@const pad = p.fs * 0.2}
+						{@const w = tw(node.label, p.fs) + pad * 2}
+						<rect
+							x={p.x - w / 2}
+							y={p.y - p.fs * 1.1 / 2 - p.fs * 0.1}
+							width={w}
+							height={p.fs * 1.1}
+							fill="#111"
+							opacity={p.opacity}
+						/>
+					{/if}
+
+					{#if renamingId === node.id}
+						{@const rw = Math.max(tw(renameValue || 'new-node', p.fs) + p.fs * 2, 80)}
+						<foreignObject
+							x={p.x - rw / 2}
+							y={p.y - p.fs * 0.9}
+							width={rw}
+							height={p.fs * 1.8}
+						>
+							<input
+								class="rename-input"
+								bind:value={renameValue}
+								style="font-size: {p.fs}px; width: 100%; height: 100%;"
+								onkeydown={(e) => {
+									if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
+									if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
+								}}
+								use:focusOnMount
+							/>
+						</foreignObject>
+					{:else}
+						<text
+							class="node-label"
+							class:focused={focusId === node.id}
+							x={p.x} y={p.y}
+							text-anchor="middle"
+							dominant-baseline="middle"
+							font-size={p.fs}
+							opacity={p.opacity}
+							onclick={() => onClickNode(node.id)}
+							role="button"
+							tabindex="0"
+							onkeydown={(e) => e.key === 'Enter' && onClickNode(node.id)}
+						>{#each node.label.split('') as char, ci}<tspan
+								class="char"
+								class:introduced
+								style="animation-delay: {(nodeTextDelays[node.id] ?? 0) + ci * CHAR_DUR}ms"
+							>{char}</tspan>{/each}</text>
+					{/if}
 				{/if}
-				<text
-					class="node-label"
-					class:focused={focusId === node.id}
-					x={p.x} y={p.y}
-					text-anchor="middle"
-					dominant-baseline="middle"
-					font-size={p.fs}
-					opacity={p.opacity}
-					onclick={() => onClickNode(node.id)}
-					role="button"
-					tabindex="0"
-					onkeydown={(e) => e.key === 'Enter' && onClickNode(node.id)}
-				>{#each node.label.split('') as char, ci}<tspan
-						class="char"
-						class:introduced
-						style="animation-delay: {nodeTextDelays[node.id] + ci * CHAR_DUR}ms"
-					>{char}</tspan>{/each}</text>
 			{/each}
 		</g>
 	</svg>
@@ -475,7 +715,7 @@
 		{#if birdseye}
 			Space to zoom back in
 		{:else}
-			hjkl navigate · <span class="hint-btn" onclick={openSearch}>/ search</span> · Space birds eye · ? help
+			hjkl navigate · o sibling · O child · <span class="hint-btn" onclick={openSearch}>/ search</span> · Space birds eye · ? help
 		{/if}
 	</div>
 
@@ -544,6 +784,28 @@
 		</div>
 	{/if}
 
+	{#if confirmDeleteId}
+		{@const delNode = nodes.find(n => n.id === confirmDeleteId)}
+		<div class="confirm-overlay" role="dialog" aria-modal="true" onclick={() => confirmDeleteId = null}>
+			<div class="confirm-box" onclick={(e) => e.stopPropagation()}>
+				<div class="confirm-title">Delete "{delNode?.label}"?</div>
+				<div class="confirm-sub">This will delete the directory and all its contents.</div>
+				<div class="confirm-btns">
+					<button class="confirm-btn confirm-yes" onclick={async () => {
+						const node = nodes.find(n => n.id === confirmDeleteId);
+						confirmDeleteId = null;
+						if (!node) return;
+						const parent = getParents(node.id)[0] ?? rootId();
+						await apiDeleteNode(node.path);
+						await loadTree();
+						focusNode(parent);
+					}}>Yes, delete</button>
+					<button class="confirm-btn confirm-no" onclick={() => confirmDeleteId = null}>Cancel</button>
+				</div>
+			</div>
+		</div>
+	{/if}
+
 	{#if showHelp}
 		<div class="help-overlay" onclick={() => showHelp = false} role="dialog" aria-modal="true">
 			<div class="help-box" onclick={(e) => e.stopPropagation()}>
@@ -554,6 +816,9 @@
 						<tr><td>j / k</td><td>Move down / up in column</td></tr>
 						<tr><td>H / L</td><td>Jump to root / deepest child</td></tr>
 						<tr><td>J / K</td><td>Jump to bottom / top of column</td></tr>
+						<tr><td>o</td><td>Create sibling node (same column)</td></tr>
+						<tr><td>O</td><td>Create child node (next column)</td></tr>
+						<tr><td>x</td><td>Delete focused node</td></tr>
 						<tr><td>Space</td><td>Toggle bird's eye view</td></tr>
 						<tr><td>Scroll</td><td>Scroll current column</td></tr>
 						<tr><td>/</td><td>Fuzzy search nodes</td></tr>
@@ -597,6 +862,22 @@
 	}
 	.node-label:hover  { fill: #222; }
 	.node-label.focused { fill: #f0f0eb; font-weight: 800; }
+
+	.rename-input {
+		width: 100%;
+		height: 100%;
+		box-sizing: border-box;
+		background: #111;
+		color: #f0f0eb;
+		border: none;
+		outline: none;
+		font-family: 'JetBrains Mono', monospace;
+		font-weight: 600;
+		text-align: center;
+		padding: 0 0.3em;
+		caret-color: #f0f0eb;
+		display: block;
+	}
 
 	.hint {
 		position: absolute;
@@ -684,4 +965,26 @@
 		font-size: 0.85rem; caret-color: #e8e8e3; padding: 0;
 	}
 	.cmd-error { color: #e06c75; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; margin-left: 1rem; }
+
+	.confirm-overlay {
+		position: fixed; inset: 0;
+		background: rgba(0,0,0,0.4);
+		display: flex; align-items: center; justify-content: center;
+		z-index: 30;
+	}
+	.confirm-box {
+		background: #1a1a1a;
+		border: 1px solid #555;
+		padding: 1.5rem 2rem;
+		font-family: 'JetBrains Mono', monospace;
+		min-width: 20rem;
+	}
+	.confirm-title { font-size: 0.95rem; font-weight: 700; color: #e8e8e3; margin-bottom: 0.5rem; }
+	.confirm-sub   { font-size: 0.78rem; color: #888; margin-bottom: 1.25rem; }
+	.confirm-btns  { display: flex; gap: 0.75rem; }
+	.confirm-btn   { font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; border: 1px solid #555; padding: 0.35rem 1rem; cursor: pointer; background: transparent; }
+	.confirm-yes   { color: #e06c75; border-color: #e06c75; }
+	.confirm-yes:hover { background: #e06c75; color: #1a1a1a; }
+	.confirm-no    { color: #888; }
+	.confirm-no:hover  { background: #333; color: #e8e8e3; }
 </style>
