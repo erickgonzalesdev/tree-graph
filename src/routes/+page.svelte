@@ -130,12 +130,13 @@
 		return result;
 	}
 
-	let target: Record<number, NodePos> = buildDefault();
+	let target: Record<number, NodePos> = buildFocused(0);
 	let anim: Record<number, NodePos> = $state(
 		nodes.reduce((acc, n) => { acc[n.id] = { ...target[n.id] }; return acc; }, {} as Record<number, NodePos>)
 	);
 
-	let focusId = $state<number | null>(null);
+	let focusId = $state<number | null>(0);
+	let birdseye = $state(false);
 	let rafId = 0;
 
 	function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
@@ -161,15 +162,74 @@
 		rafId = requestAnimationFrame(step);
 	}
 
+	function focusNode(id: number) {
+		focusId = id;
+		if (!birdseye) {
+			target = buildFocused(id);
+			startAnim();
+		}
+	}
+
 	function onClickNode(id: number) {
+		birdseye = false;
 		if (focusId === id) {
 			focusId = null;
 			target = buildDefault();
 		} else {
-			focusId = id;
-			target = buildFocused(id);
+			focusNode(id);
 		}
 		startAnim();
+	}
+
+	function getSiblings(id: number): number[] {
+		const parents = getParents(id);
+		if (parents.length === 0) return [];
+		return getChildren(parents[0]).filter(c => c !== id);
+	}
+
+	function getSiblingIndex(id: number): number {
+		const parents = getParents(id);
+		if (parents.length === 0) return 0;
+		return getChildren(parents[0]).indexOf(id);
+	}
+
+	function onKeyNav(e: KeyboardEvent) {
+		const cur = focusId;
+		if (e.key === ' ') {
+			e.preventDefault();
+			if (birdseye) {
+				birdseye = false;
+				const returnTo = focusId ?? 0;
+				target = buildFocused(returnTo);
+			} else {
+				birdseye = true;
+				target = buildDefault();
+			}
+			startAnim();
+			return;
+		}
+		if (!['h','j','k','l'].includes(e.key)) return;
+		e.preventDefault();
+		const from = cur ?? 0;
+		let next: number | null = null;
+		if (e.key === 'l') {
+			const ch = getChildren(from);
+			if (ch.length > 0) next = ch[0];
+		} else if (e.key === 'h') {
+			const par = getParents(from);
+			if (par.length > 0) next = par[0];
+		} else if (e.key === 'j' || e.key === 'k') {
+			const fromDepth = depthOf(from);
+			const base = buildDefault();
+			const sameDepth = nodes
+				.filter(n => depthOf(n.id) === fromDepth)
+				.sort((a, b) => base[a.id].y - base[b.id].y)
+				.map(n => n.id);
+			const idx = sameDepth.indexOf(from);
+			if (e.key === 'j' && idx < sameDepth.length - 1) next = sameDepth[idx + 1];
+			else if (e.key === 'k' && idx > 0) next = sameDepth[idx - 1];
+		}
+		if (next !== null) focusNode(next);
 	}
 
 	// For each parent, compute the connector group:
@@ -219,21 +279,40 @@
 
 <svelte:head>
 	<title>Tree Graph</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com" />
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+	<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
 </svelte:head>
+
+<svelte:window onkeydown={onKeyNav} />
 
 <div class="scene">
 	<svg width="100%" height="100%" viewBox="-380 -220 760 440" preserveAspectRatio="xMidYMid meet">
 		<g>
 			{#each buildConnectors() as cg (cg.parentId)}
-				<line x1={cg.hx1} y1={cg.hy} x2={cg.hx2} y2={cg.hy} stroke="#475569" stroke-width="0.8" opacity={cg.opacity} />
-				<line x1={cg.trunkX} y1={cg.trunkY1} x2={cg.trunkX} y2={cg.trunkY2} stroke="#475569" stroke-width="0.8" opacity={cg.opacity} />
+				<line x1={cg.hx1} y1={cg.hy} x2={cg.hx2} y2={cg.hy} stroke="#aaa" stroke-width="0.8" opacity={cg.opacity} />
+				<line x1={cg.trunkX} y1={cg.trunkY1} x2={cg.trunkX} y2={cg.trunkY2} stroke="#aaa" stroke-width="0.8" opacity={cg.opacity} />
 				{#each cg.branches as b}
-					<line x1={cg.trunkX} y1={b.y} x2={b.x2} y2={b.y} stroke="#475569" stroke-width="0.8" opacity={cg.opacity} />
+					<line x1={cg.trunkX} y1={b.y} x2={b.x2} y2={b.y} stroke="#aaa" stroke-width="0.8" opacity={cg.opacity} />
 				{/each}
 			{/each}
 
 			{#each nodes as node}
 				{@const p = anim[node.id]}
+				{#if focusId === node.id}
+					{@const pad = p.fs * 0.2}
+					{@const w = tw(node.label, p.fs) + pad * 2}
+					{@const h = p.fs * 1.1}
+					<rect
+						x={p.x - w / 2}
+						y={p.y - h / 2 - p.fs * 0.1}
+						width={w}
+						height={h}
+						rx={0}
+						fill="#111"
+						opacity={p.opacity}
+					/>
+				{/if}
 				<text
 					class="node-label"
 					class:focused={focusId === node.id}
@@ -253,7 +332,7 @@
 	</svg>
 
 	<div class="hint">
-		{focusId !== null ? 'Click node again to reset' : 'Click a node to focus'}
+		{birdseye ? 'Space to zoom back in' : 'hjkl navigate · Space for birds eye'}
 	</div>
 </div>
 
@@ -264,7 +343,7 @@
 		width: 100%;
 		height: 100%;
 		overflow: hidden;
-		background: #0f172a;
+		background: #e8e8e3;
 	}
 
 	.scene {
@@ -274,26 +353,26 @@
 	}
 
 	.node-label {
-		font-family: monospace;
+		font-family: 'JetBrains Mono', monospace;
 		font-weight: 600;
-		fill: #e2e8f0;
+		fill: #3a3a3a;
 		cursor: pointer;
 		user-select: none;
 		outline: none;
 	}
 
-	.node-label:hover { fill: #f59e0b; }
-	.node-label.focused { fill: #818cf8; }
+	.node-label:hover { fill: #222; }
+	.node-label.focused { fill: #f0f0eb; font-weight: 800; }
 
 	.hint {
 		position: absolute;
 		top: 1rem;
 		left: 50%;
 		transform: translateX(-50%);
-		color: #94a3b8;
-		font-family: sans-serif;
-		font-size: 0.875rem;
-		background: rgba(15, 23, 42, 0.7);
+		color: #888;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 0.75rem;
+		background: rgba(232, 232, 227, 0.85);
 		padding: 0.4rem 1rem;
 		border-radius: 999px;
 		pointer-events: none;
