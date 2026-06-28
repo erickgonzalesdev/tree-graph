@@ -137,7 +137,59 @@
 
 	let focusId = $state<number | null>(0);
 	let birdseye = $state(false);
+	let showHelp = $state(false);
+	let introduced = $state(false);
 	let rafId = 0;
+
+	import { onMount } from 'svelte';
+	onMount(() => { requestAnimationFrame(() => { introduced = true; }); });
+
+	const SEG_DUR = 22;
+	const CHAR_DUR = 12;
+
+	function buildIntroSequence(): Record<string, number> {
+		const delays: Record<string, number> = {};
+		let t = 0;
+		function walk(pid: number) {
+			const children = getChildren(pid);
+			if (children.length === 0) return;
+			delays[`h-${pid}`] = t; t += SEG_DUR;
+			delays[`trunk-${pid}`] = t; t += SEG_DUR;
+			children.forEach((cid, bi) => {
+				delays[`b-${pid}-${bi}`] = t; t += SEG_DUR;
+				walk(cid);
+			});
+		}
+		walk(0);
+		return delays;
+	}
+
+	const introSeq = buildIntroSequence();
+
+	function buildNodeTextDelays(): Record<number, number> {
+		const base = buildDefault();
+		const maxDepth = Math.max(...nodes.map(n => depthOf(n.id)));
+		const delays: Record<number, number> = {};
+		let colStart = 0;
+		for (let depth = 0; depth <= maxDepth; depth++) {
+			const col = nodes
+				.filter(n => depthOf(n.id) === depth)
+				.sort((a, b) => base[a.id].y - base[b.id].y);
+			let t = colStart;
+			for (const n of col) {
+				delays[n.id] = t;
+				t += n.label.length * CHAR_DUR;
+			}
+			colStart = t;
+		}
+		return delays;
+	}
+
+	const nodeTextDelays = buildNodeTextDelays();
+
+	function nodeIntroDelay(id: number): number {
+		return nodeTextDelays[id] ?? 0;
+	}
 
 	function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
 
@@ -146,17 +198,17 @@
 		const step = () => {
 			let moving = false;
 			const next: Record<number, NodePos> = {};
-			nodes.forEach(n => {
+				nodes.forEach(n => {
 				const a = anim[n.id];
 				const t = target[n.id];
 				const nx = lerp(a.x, t.x, 0.1);
 				const ny = lerp(a.y, t.y, 0.1);
 				const nfs = lerp(a.fs, t.fs, 0.1);
 				const nop = lerp(a.opacity, t.opacity, 0.1);
-				if (Math.abs(nx - t.x) > 0.05 || Math.abs(ny - t.y) > 0.05) moving = true;
+				if (Math.abs(nx - t.x) > 1 || Math.abs(ny - t.y) > 1) moving = true;
 				next[n.id] = { x: nx, y: ny, fs: nfs, opacity: nop };
 			});
-			anim = next;
+				anim = next;
 			if (moving) rafId = requestAnimationFrame(step);
 		};
 		rafId = requestAnimationFrame(step);
@@ -195,6 +247,8 @@
 
 	function onKeyNav(e: KeyboardEvent) {
 		const cur = focusId;
+		if (e.key === '?') { showHelp = !showHelp; return; }
+		if (e.key === 'Escape') { showHelp = false; return; }
 		if (e.key === ' ') {
 			e.preventDefault();
 			if (birdseye) {
@@ -208,72 +262,99 @@
 			startAnim();
 			return;
 		}
-		if (!['h','j','k','l'].includes(e.key)) return;
+		if (!['h','j','k','l','H','J','K','L'].includes(e.key)) return;
 		e.preventDefault();
 		const from = cur ?? 0;
 		let next: number | null = null;
+		const fromDepth = depthOf(from);
+		const base = buildDefault();
+		const sameDepth = nodes
+			.filter(n => depthOf(n.id) === fromDepth)
+			.sort((a, b) => base[a.id].y - base[b.id].y)
+			.map(n => n.id);
+		const idx = sameDepth.indexOf(from);
+
 		if (e.key === 'l') {
 			const ch = getChildren(from);
 			if (ch.length > 0) next = ch[0];
+		} else if (e.key === 'L') {
+			let n = from;
+			while (getChildren(n).length > 0) n = getChildren(n)[0];
+			if (n !== from) next = n;
 		} else if (e.key === 'h') {
 			const par = getParents(from);
 			if (par.length > 0) next = par[0];
-		} else if (e.key === 'j' || e.key === 'k') {
-			const fromDepth = depthOf(from);
-			const base = buildDefault();
-			const sameDepth = nodes
-				.filter(n => depthOf(n.id) === fromDepth)
-				.sort((a, b) => base[a.id].y - base[b.id].y)
-				.map(n => n.id);
-			const idx = sameDepth.indexOf(from);
-			if (e.key === 'j' && idx < sameDepth.length - 1) next = sameDepth[idx + 1];
-			else if (e.key === 'k' && idx > 0) next = sameDepth[idx - 1];
+		} else if (e.key === 'H') {
+			let n = from;
+			while (getParents(n).length > 0) n = getParents(n)[0];
+			if (n !== from) next = n;
+		} else if (e.key === 'j') {
+			if (idx < sameDepth.length - 1) next = sameDepth[idx + 1];
+		} else if (e.key === 'J') {
+			if (sameDepth.length > 0) next = sameDepth[sameDepth.length - 1];
+		} else if (e.key === 'k') {
+			if (idx > 0) next = sameDepth[idx - 1];
+		} else if (e.key === 'K') {
+			if (sameDepth.length > 0) next = sameDepth[0];
 		}
+		if (next !== null && next !== from) focusNode(next);
+	}
+
+	let wheelAccum = 0;
+	function onWheel(e: WheelEvent) {
+		e.preventDefault();
+		wheelAccum += e.deltaY;
+		const threshold = 60;
+		if (Math.abs(wheelAccum) < threshold) return;
+		const dir = wheelAccum > 0 ? 'j' : 'k';
+		wheelAccum = 0;
+		const from = focusId ?? 0;
+		const fromDepth = depthOf(from);
+		const base = buildDefault();
+		const sameDepth = nodes
+			.filter(n => depthOf(n.id) === fromDepth)
+			.sort((a, b) => base[a.id].y - base[b.id].y)
+			.map(n => n.id);
+		const idx = sameDepth.indexOf(from);
+		let next: number | null = null;
+		if (dir === 'j' && idx < sameDepth.length - 1) next = sameDepth[idx + 1];
+		else if (dir === 'k' && idx > 0) next = sameDepth[idx - 1];
 		if (next !== null) focusNode(next);
 	}
 
-	// For each parent, compute the connector group:
-	// - horizontal line: parent right-edge → trunk X
-	// - vertical trunk: spans from first child Y to last child Y
-	// - per child: horizontal branch from trunk X → child left-edge
-	type ConnectorGroup = {
+	type EdgePath = {
 		parentId: number;
-		hx1: number; hx2: number; hy: number;       // parent → trunk
-		trunkX: number; trunkY1: number; trunkY2: number; // vertical trunk
-		branches: { y: number; x2: number }[];       // trunk → each child
+		childId: number;
+		d: string;
 		opacity: number;
+		active: boolean;
 	};
 
-	function buildConnectors(): ConnectorGroup[] {
-		const groups: ConnectorGroup[] = [];
-		const parents = [...new Set(edges.map(([a]) => a))];
-		for (const pid of parents) {
-			const children = getChildren(pid);
-			if (children.length === 0) continue;
+	function isConnectedToFocus(pid: number): boolean {
+		if (focusId === null) return true;
+		const children = getChildren(pid);
+		return pid === focusId || children.includes(focusId) ||
+			getParents(focusId).includes(pid) ||
+			children.some(c => getParents(focusId).includes(c)) ||
+			getParents(pid).some(p => p === focusId);
+	}
+
+	function buildConnectors(): EdgePath[] {
+		const paths: EdgePath[] = [];
+		for (const [pid, cid] of edges) {
 			const p = anim[pid];
+			const c = anim[cid];
 			const pW = tw(nodes[pid].label, p.fs) / 2;
-			const childPositions = children.map(cid => {
-				const c = anim[cid];
-				const cW = tw(nodes[cid].label, c.fs) / 2;
-				return { y: c.y, x: c.x - cW, opacity: c.opacity };
-			});
-			// trunk X = midpoint between parent right edge and leftmost child left edge
-			const parentRight = p.x + pW;
-			const minChildLeft = Math.min(...childPositions.map(c => c.x));
-			const trunkX = (parentRight + minChildLeft) / 2;
-			const ys = childPositions.map(c => c.y);
-			const trunkY1 = Math.min(...ys);
-			const trunkY2 = Math.max(...ys);
-			const opacity = Math.min(p.opacity, Math.min(...childPositions.map(c => c.opacity))) * 0.85;
-			groups.push({
-				parentId: pid,
-				hx1: parentRight, hx2: trunkX, hy: p.y,
-				trunkX, trunkY1, trunkY2,
-				branches: childPositions.map(c => ({ y: c.y, x2: c.x })),
-				opacity
-			});
+			const cW = tw(nodes[cid].label, c.fs) / 2;
+			const x1 = p.x + pW;
+			const x2 = c.x - cW;
+			const midX = (x1 + x2) / 2;
+			const d = `M ${x1} ${p.y} H ${midX} V ${c.y} H ${x2}`;
+			const opacity = Math.min(p.opacity, c.opacity) * 0.85;
+			const active = isConnectedToFocus(pid);
+			paths.push({ parentId: pid, childId: cid, d, opacity, active });
 		}
-		return groups;
+		return paths;
 	}
 </script>
 
@@ -286,19 +367,20 @@
 
 <svelte:window onkeydown={onKeyNav} />
 
-<div class="scene">
+<div class="scene" onwheel={onWheel}>
 	<svg width="100%" height="100%" viewBox="-380 -220 760 440" preserveAspectRatio="xMidYMid meet">
 		<g>
-			{#each buildConnectors() as cg (cg.parentId)}
-				<line x1={cg.hx1} y1={cg.hy} x2={cg.hx2} y2={cg.hy} stroke="#aaa" stroke-width="0.8" opacity={cg.opacity} />
-				<line x1={cg.trunkX} y1={cg.trunkY1} x2={cg.trunkX} y2={cg.trunkY2} stroke="#aaa" stroke-width="0.8" opacity={cg.opacity} />
-				{#each cg.branches as b}
-					<line x1={cg.trunkX} y1={b.y} x2={b.x2} y2={b.y} stroke="#aaa" stroke-width="0.8" opacity={cg.opacity} />
-				{/each}
+			{#each buildConnectors() as ep (`${ep.parentId}-${ep.childId}`)}
+				{@const stroke = ep.active ? '#555' : '#ccc'}
+				{@const sw = ep.active ? 1.2 : 0.6}
+				{@const bi = getChildren(ep.parentId).indexOf(ep.childId)}
+				<path class="connector" class:introduced d={ep.d} fill="none" stroke={stroke} stroke-width={sw} opacity={ep.opacity} pathLength="1" style="transition: stroke 0.3s, stroke-width 0.3s; animation-delay: {introSeq[`b-${ep.parentId}-${bi}`]}ms" />
 			{/each}
+
 
 			{#each nodes as node}
 				{@const p = anim[node.id]}
+				{@const baseDelay = nodeIntroDelay(node.id)}
 				{#if focusId === node.id}
 					{@const pad = p.fs * 0.2}
 					{@const w = tw(node.label, p.fs) + pad * 2}
@@ -311,7 +393,7 @@
 						rx={0}
 						fill="#111"
 						opacity={p.opacity}
-					/>
+				/>
 				{/if}
 				<text
 					class="node-label"
@@ -326,14 +408,38 @@
 					role="button"
 					tabindex="0"
 					onkeydown={(e) => e.key === 'Enter' && onClickNode(node.id)}
-				>{node.label}</text>
+				>{#each node.label.split('') as char, ci}<tspan
+						class="char"
+						class:introduced
+						style="animation-delay: {baseDelay + ci * CHAR_DUR}ms"
+					>{char}</tspan>{/each}</text>
 			{/each}
 		</g>
 	</svg>
 
 	<div class="hint">
-		{birdseye ? 'Space to zoom back in' : 'hjkl navigate · Space for birds eye'}
+		{birdseye ? 'Space to zoom back in' : 'hjkl navigate · Space for birds eye · ? for help'}
 	</div>
+
+	{#if showHelp}
+		<div class="help-overlay" onclick={() => showHelp = false} role="dialog" aria-modal="true">
+			<div class="help-box" onclick={(e) => e.stopPropagation()}>
+				<div class="help-title">Keyboard Shortcuts</div>
+				<table>
+					<tbody>
+						<tr><td>h / l</td><td>Move to parent / first child</td></tr>
+						<tr><td>j / k</td><td>Move down / up in column</td></tr>
+						<tr><td>H / L</td><td>Jump to root / deepest child</td></tr>
+						<tr><td>J / K</td><td>Jump to bottom / top of column</td></tr>
+						<tr><td>Space</td><td>Toggle bird's eye view</td></tr>
+						<tr><td>Scroll</td><td>Scroll current column</td></tr>
+						<tr><td>?</td><td>Toggle this help</td></tr>
+						<tr><td>Esc</td><td>Close help</td></tr>
+					</tbody>
+				</table>
+			</div>
+		</div>
+	{/if}
 </div>
 
 <style>
@@ -352,6 +458,28 @@
 		position: relative;
 	}
 
+
+	@keyframes pop-in {
+		0%   { opacity: 0; }
+		100% { opacity: 1; }
+	}
+
+	@keyframes draw-in {
+		from { stroke-dashoffset: 1; }
+		to   { stroke-dashoffset: 0; }
+	}
+
+
+	.char { opacity: 0; }
+	.char.introduced { animation: pop-in 0.05s steps(1) both; }
+
+	.connector:not(.introduced) { stroke-dasharray: 1; stroke-dashoffset: 1; opacity: 0; }
+	.connector.introduced {
+		stroke-dasharray: 1;
+		animation: draw-in 0.022s linear both;
+	}
+	.connector { stroke-linecap: butt; stroke-linejoin: miter; }
+
 	.node-label {
 		font-family: 'JetBrains Mono', monospace;
 		font-weight: 600;
@@ -363,6 +491,38 @@
 
 	.node-label:hover { fill: #222; }
 	.node-label.focused { fill: #f0f0eb; font-weight: 800; }
+
+	.help-overlay {
+		position: fixed;
+		inset: 0;
+		background: rgba(0,0,0,0.25);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 10;
+	}
+
+	.help-box {
+		background: #e8e8e3;
+		border: 1px solid #ccc;
+		padding: 1.5rem 2rem;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 0.8rem;
+		color: #3a3a3a;
+		min-width: 18rem;
+	}
+
+	.help-title {
+		font-weight: 800;
+		font-size: 0.9rem;
+		margin-bottom: 1rem;
+		color: #111;
+	}
+
+	.help-box table { border-collapse: collapse; width: 100%; }
+	.help-box td { padding: 0.25rem 0.5rem; }
+	.help-box td:first-child { font-weight: 700; color: #111; white-space: nowrap; }
+	.help-box tr:hover td { background: rgba(0,0,0,0.05); }
 
 	.hint {
 		position: absolute;
