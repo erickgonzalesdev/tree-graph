@@ -138,10 +138,51 @@
 	let focusId = $state<number | null>(0);
 	let birdseye = $state(false);
 	let showHelp = $state(false);
+	let showSearch = $state(false);
+	let searchQuery = $state('');
+	let searchSel = $state(0);
 	let introduced = $state(false);
 	let rafId = 0;
+	let searchInput = $state<HTMLInputElement | null>(null);
+
+	function fuzzyMatch(query: string, label: string): boolean {
+		if (!query) return true;
+		const q = query.toLowerCase();
+		const l = label.toLowerCase();
+		let qi = 0;
+		for (let i = 0; i < l.length && qi < q.length; i++) {
+			if (l[i] === q[qi]) qi++;
+		}
+		return qi === q.length;
+	}
+
+	function searchResults(): typeof nodes {
+		return nodes.filter(n => fuzzyMatch(searchQuery, n.label));
+	}
+
+	function openSearch() {
+		showSearch = true;
+		searchQuery = '';
+		searchSel = 0;
+	}
+
+	function closeSearch() {
+		showSearch = false;
+		searchQuery = '';
+		searchSel = 0;
+	}
+
+	function commitSearch() {
+		const results = searchResults();
+		if (results[searchSel]) {
+			birdseye = false;
+			focusNode(results[searchSel].id);
+		}
+		closeSearch();
+	}
 
 	import { onMount } from 'svelte';
+	function focusOnMount(el: HTMLElement) { setTimeout(() => el.focus(), 0); }
 	onMount(() => { requestAnimationFrame(() => { introduced = true; }); });
 
 	const SEG_DUR = 22;
@@ -245,8 +286,26 @@
 		return getChildren(parents[0]).indexOf(id);
 	}
 
+	function onSearchKey(e: KeyboardEvent) {
+		if (e.key === 'Escape') { e.preventDefault(); closeSearch(); return; }
+		if (e.key === 'Enter') { e.preventDefault(); commitSearch(); return; }
+		if (e.key === 'ArrowDown' || e.key === 'Tab') {
+			e.preventDefault();
+			const max = searchResults().length - 1;
+			searchSel = Math.min(searchSel + 1, max);
+			return;
+		}
+		if (e.key === 'ArrowUp') {
+			e.preventDefault();
+			searchSel = Math.max(searchSel - 1, 0);
+			return;
+		}
+	}
+
 	function onKeyNav(e: KeyboardEvent) {
+		if (showSearch) { if (e.key === 'Escape') closeSearch(); return; }
 		const cur = focusId;
+		if (e.key === '/') { e.preventDefault(); openSearch(); return; }
 		if (e.key === '?') { showHelp = !showHelp; return; }
 		if (e.key === 'Escape') { showHelp = false; return; }
 		if (e.key === ' ') {
@@ -418,8 +477,48 @@
 	</svg>
 
 	<div class="hint">
-		{birdseye ? 'Space to zoom back in' : 'hjkl navigate · Space for birds eye · ? for help'}
+		{#if birdseye}
+			Space to zoom back in
+		{:else}
+			hjkl navigate · <span class="hint-btn" onclick={openSearch}>/ search</span> · Space birds eye · ? help
+		{/if}
 	</div>
+
+	{#if showSearch}
+		<div class="search-overlay" role="dialog" aria-modal="true" onclick={closeSearch}>
+			<div class="search-box" onclick={(e) => e.stopPropagation()}>
+				<div class="search-input-row">
+					<span class="search-slash">/</span>
+					<input
+						bind:this={searchInput}
+						bind:value={searchQuery}
+						class="search-input"
+						placeholder="search nodes..."
+						autocomplete="off"
+						spellcheck={false}
+						onkeydown={onSearchKey}
+						oninput={() => { searchSel = 0; }}
+						use:focusOnMount
+					/>
+				</div>
+				<ul class="search-results">
+					{#each searchResults() as node, i}
+						<li
+							class="search-result"
+							class:selected={i === searchSel}
+							onclick={() => { searchSel = i; commitSearch(); }}
+							onmouseenter={() => { searchSel = i; }}
+							role="option"
+							aria-selected={i === searchSel}
+						>{node.label}</li>
+					{/each}
+					{#if searchResults().length === 0}
+						<li class="search-empty">no results</li>
+					{/if}
+				</ul>
+			</div>
+		</div>
+	{/if}
 
 	{#if showHelp}
 		<div class="help-overlay" onclick={() => showHelp = false} role="dialog" aria-modal="true">
@@ -433,7 +532,8 @@
 						<tr><td>J / K</td><td>Jump to bottom / top of column</td></tr>
 						<tr><td>Space</td><td>Toggle bird's eye view</td></tr>
 						<tr><td>Scroll</td><td>Scroll current column</td></tr>
-						<tr><td>?</td><td>Toggle this help</td></tr>
+						<tr><td>/</td><td>Fuzzy search nodes</td></tr>
+					<tr><td>?</td><td>Toggle this help</td></tr>
 						<tr><td>Esc</td><td>Close help</td></tr>
 					</tbody>
 				</table>
@@ -537,5 +637,86 @@
 		border-radius: 999px;
 		pointer-events: none;
 		backdrop-filter: blur(4px);
+	}
+
+	.hint-btn {
+		pointer-events: all;
+		cursor: pointer;
+		color: #555;
+	}
+
+	.hint-btn:hover { color: #222; }
+
+	.search-overlay {
+		position: fixed;
+		inset: 0;
+		display: flex;
+		align-items: flex-start;
+		justify-content: center;
+		padding-top: 15vh;
+		z-index: 20;
+		background: rgba(0,0,0,0.45);
+	}
+
+	.search-box {
+		width: 360px;
+		background: #1a1a1a;
+		border: 1px solid #444;
+		font-family: 'JetBrains Mono', monospace;
+	}
+
+	.search-input-row {
+		display: flex;
+		align-items: center;
+		border-bottom: 1px solid #333;
+		padding: 0 0.75rem;
+	}
+
+	.search-slash {
+		color: #666;
+		font-size: 0.9rem;
+		margin-right: 0.5rem;
+		user-select: none;
+	}
+
+	.search-input {
+		flex: 1;
+		background: transparent;
+		border: none;
+		outline: none;
+		color: #e8e8e3;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 0.85rem;
+		padding: 0.6rem 0;
+		caret-color: #e8e8e3;
+	}
+
+	.search-input::placeholder { color: #555; }
+
+	.search-results {
+		list-style: none;
+		margin: 0;
+		padding: 0.25rem 0;
+		max-height: 240px;
+		overflow-y: auto;
+	}
+
+	.search-result {
+		padding: 0.4rem 1rem;
+		color: #aaa;
+		font-size: 0.82rem;
+		cursor: pointer;
+	}
+
+	.search-result.selected {
+		background: #2e2e2e;
+		color: #e8e8e3;
+	}
+
+	.search-empty {
+		padding: 0.4rem 1rem;
+		color: #555;
+		font-size: 0.82rem;
+		font-style: italic;
 	}
 </style>

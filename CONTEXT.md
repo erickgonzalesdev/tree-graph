@@ -40,6 +40,7 @@ Node IDs: 0=Node1, 1=Node2, 2=Node3, 3=Node4, 4=Node5, 5=Node6, 6=Node7
 - `J/K` — jump to bottom / top of current column
 - `Space` — toggle bird's eye view (full tree) / zoomed view; returns to last focused node
 - In bird's eye, `hjkl` updates selected node without zooming in — Space zooms into selection
+- `/` — open fuzzy search overlay
 - `?` — toggle help popup
 - `Scroll` — scroll current column (j/k direction)
 
@@ -105,6 +106,18 @@ Sequential left→right, top→bottom reveal:
 - Single `<path>` per edge — no overlap artifacts at line corners
 - Bird's eye / zoom toggle works correctly with keyboard navigation
 - Typewriter intro: left→right per node, top→bottom per column, one column at a time
+- Rofi-style fuzzy search: `/` key or clicking "/ search" in hint bar opens dark overlay; type to filter, `↑/↓`/`Tab` to select, `Enter` to jump, `Escape` or click outside to close
+
+## Fuzzy Search
+- `showSearch` state toggles overlay
+- `searchQuery` bound to input, `searchSel` tracks highlighted result index
+- `fuzzyMatch(query, label)`: character subsequence match (not substring)
+- `searchResults()`: filters nodes by fuzzyMatch
+- `openSearch()` / `closeSearch()` / `commitSearch()`: open, dismiss, and navigate
+- `onSearchKey()`: handles `Escape`, `Enter`, `ArrowUp/Down`, `Tab` inside the input
+- `onKeyNav` passes `Escape` through when search is open; blocks all other nav keys while search is active
+- Clicking overlay backdrop closes; clicking inside search box stops propagation
+- `focusOnMount` action: Svelte action that focuses the input element on mount
 
 ## Possible Next Steps
 - Add more nodes / deeper tree
