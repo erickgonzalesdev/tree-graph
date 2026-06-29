@@ -213,13 +213,16 @@ Sequential left→right, top→bottom reveal:
 | `q` / `quit` | Close command bar |
 
 ## Markdown Editor
-- `n` key creates a new `.md` file in the focused node's directory (inline rename → then opens editor)
+- `n` key creates a new `.md` file in the focused node's directory (inline rename → then opens panel)
+- `Enter` on a focused file node opens the inline panel in edit mode
 - File nodes display a `¶` badge suffix in the tree
-- Editor is a full-screen overlay (CodeMirror + vim mode + live markdown preview)
-- Split view: left = editor, right = live preview rendered by `marked`
-- Vim ex commands: `:w` save, `:wq` save & enter view mode, `:q` enter view mode without saving
-- View mode: full rendered markdown; `i` or `Enter` → back to editor; `Esc` → back to tree
-- `renamingIsFile` flag distinguishes file rename from dir rename — triggers `openEditor` after commit
+- **Inline panel**: a `<foreignObject>` card rendered directly in the SVG graph, positioned to the right of the node label — no overlay, graph stays fully visible
+- Panel size scales with node font size (`p.fs / 11`) so it feels anchored to the node at any zoom level
+- Edit mode: CodeMirror + vim mode inside the panel; `:w` save, `:wq` save & switch to view, `:q` view without saving
+- View mode: rendered markdown (via `marked`) in the panel; `i`/`Enter` → edit; `Esc` → close panel
+- Navigating away (hjkl, clicking another node) auto-saves and closes the panel
+- `renamingIsFile` flag distinguishes file rename from dir rename — triggers `openInlinePanel` after commit
+- State: `inlineNode`, `inlineMode ('view'|'edit')`, `inlineContent`, `inlineEl`, `inlineView` (EditorView)
 
 ## Roadmap
 - Duplicate node in place (`d`)

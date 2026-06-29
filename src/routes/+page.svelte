@@ -357,68 +357,65 @@
 		requestAnimationFrame(() => { introduced = true; });
 	});
 
-	// --- Markdown editor ---
+	// --- Inline markdown panel ---
 
-	async function openEditor(node: Node, mode: 'edit' | 'view' = 'edit') {
-		const res = await fetch(`/api/content?path=${encodeURIComponent(node.path)}`);
-		const data = await res.json();
-		editorContent = data.content ?? '';
-		editorNode = node;
-		editorMode = mode;
+	async function openInlinePanel(node: Node, mode: 'view' | 'edit' = 'view') {
+		if (inlineNode?.id !== node.id) {
+			closeInlinePanel();
+			const res = await fetch(`/api/content?path=${encodeURIComponent(node.path)}`);
+			const data = await res.json();
+			inlineContent = data.content ?? '';
+		}
+		inlineNode = node;
+		inlineMode = mode;
 		if (mode === 'edit') {
 			await tick();
-			mountEditor();
+			mountInlineEditor();
 		}
 	}
 
-	function mountEditor() {
-		if (editorView) { editorView.destroy(); editorView = null; }
-		if (!editorEl) return;
-		Vim.defineEx('w', '', () => { saveEditor(); });
-		Vim.defineEx('wq', '', () => { closeEditorToView(); });
-		Vim.defineEx('q', '', () => { closeEditorToView(); });
-		editorView = new EditorView({
-			doc: editorContent,
+	function mountInlineEditor() {
+		if (inlineView) { inlineView.destroy(); inlineView = null; }
+		if (!inlineEl) return;
+		Vim.defineEx('w', '', () => { saveInline(); });
+		Vim.defineEx('wq', '', () => { saveInline().then(() => { inlineMode = 'view'; if (inlineView) { inlineView.destroy(); inlineView = null; } }); });
+		Vim.defineEx('q', '', () => { inlineMode = 'view'; if (inlineView) { inlineView.destroy(); inlineView = null; } });
+		inlineView = new EditorView({
+			doc: inlineContent,
 			extensions: [
 				vim(),
 				basicSetup,
 				markdown(),
 				oneDark,
 				EditorView.updateListener.of(update => {
-					if (update.docChanged) {
-						editorContent = update.state.doc.toString();
-					}
+					if (update.docChanged) inlineContent = update.state.doc.toString();
 				}),
 				EditorView.theme({
-					'&': { height: '100%', fontSize: '14px', fontFamily: "'JetBrains Mono', monospace" },
-					'.cm-scroller': { overflow: 'auto' }
+					'&': { height: '100%', fontSize: '13px', fontFamily: "'JetBrains Mono', monospace" },
+					'.cm-scroller': { overflow: 'auto' },
+					'.cm-editor': { background: '#111' },
 				}),
 			],
-			parent: editorEl,
+			parent: inlineEl,
 		});
-		(editorView.dom as HTMLElement).focus();
+		(inlineView.dom as HTMLElement).focus();
 	}
 
-	async function saveEditor() {
-		if (!editorNode) return;
-		if (editorView) editorContent = editorView.state.doc.toString();
+	async function saveInline() {
+		if (!inlineNode) return;
+		if (inlineView) inlineContent = inlineView.state.doc.toString();
 		await fetch('/api/content', {
 			method: 'PUT',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ path: editorNode.path, content: editorContent })
+			body: JSON.stringify({ path: inlineNode.path, content: inlineContent })
 		});
 	}
 
-	async function closeEditorToView() {
-		await saveEditor();
-		if (editorView) { editorView.destroy(); editorView = null; }
-		editorMode = 'view';
-	}
-
-	function closeEditorToTree() {
-		if (editorView) { editorView.destroy(); editorView = null; }
-		editorNode = null;
-		editorMode = 'edit';
+	function closeInlinePanel() {
+		if (inlineView) { inlineView.destroy(); inlineView = null; }
+		inlineNode = null;
+		inlineMode = 'view';
+		inlineContent = '';
 	}
 
 	async function createMarkdownFile() {
@@ -452,6 +449,7 @@
 	// --- Navigation ---
 
 	function focusNode(id: string) {
+		if (inlineNode && inlineNode.id !== id) { saveInline().then(() => closeInlinePanel()); }
 		focusId = id;
 		if (!birdseye) { target = buildFocused(id); startAnim(); }
 	}
@@ -460,8 +458,14 @@
 		if (renamingId) return;
 		birdseye = false;
 		if (focusId === id) {
-			focusId = null;
-			target = buildDefault();
+			const node = nodes.find(n => n.id === id);
+			if (node?.type === 'file' && !inlineNode) {
+				openInlinePanel(node);
+			} else {
+				closeInlinePanel();
+				focusId = null;
+				target = buildDefault();
+			}
 		} else {
 			focusNode(id);
 		}
@@ -545,7 +549,7 @@
 		if (!node || !newName) { if (wasNew) { apiDeleteNode(node!.path).then(() => loadTree()); } return; }
 		if (newName === node.label && !wasNew) { return; }
 		if (newName === node.label && wasNew) {
-			if (wasFile) { openEditor(node, 'edit'); } else { focusNode(node.id); }
+			if (wasFile) { openInlinePanel(node, 'edit'); } else { focusNode(node.id); }
 			return;
 		}
 		const parentPath = node.path.split('/').slice(0, -1).join('/') || '/';
@@ -558,7 +562,7 @@
 			focusNode(newId);
 			if (wasFile) {
 				const freshNode = nodes.find(n => n.id === newId);
-				if (freshNode) openEditor(freshNode, 'edit');
+				if (freshNode) openInlinePanel(freshNode, 'edit');
 			}
 		}
 	}
@@ -580,18 +584,19 @@
 	}
 
 	function onKeyNav(e: KeyboardEvent) {
-		if (editorNode) {
-			if (editorMode === 'view') {
-				if (e.key === 'i' || e.key === 'Enter') {
-					e.preventDefault();
-					editorMode = 'edit';
-					tick().then(mountEditor);
-				} else if (e.key === 'Escape') {
-					e.preventDefault();
-					closeEditorToTree();
-				}
+		if (inlineNode && inlineMode === 'edit') return;
+		if (inlineNode && inlineMode === 'view') {
+			if (e.key === 'i' || e.key === 'Enter') {
+				e.preventDefault();
+				inlineMode = 'edit';
+				tick().then(mountInlineEditor);
+				return;
 			}
-			return;
+			if (e.key === 'Escape') {
+				e.preventDefault();
+				closeInlinePanel();
+				return;
+			}
 		}
 		if (renamingId) return;
 		if (e.key === 'r' && e.ctrlKey) {
@@ -726,7 +731,7 @@
 		e.preventDefault();
 		if (focusId) {
 			const node = nodes.find(n => n.id === focusId);
-			if (node?.type === 'file') openEditor(node);
+			if (node?.type === 'file') openInlinePanel(node, 'edit');
 		}
 		return;
 	}
@@ -1017,12 +1022,12 @@
 							font-size={p.fs}
 							opacity={p.opacity}
 							onclick={() => {
-								if (node.type === 'file' && focusId === node.id) { openEditor(node); }
+								if (node.type === 'file' && focusId === node.id) { openInlinePanel(node); }
 								else { onClickNode(node.id); }
 							}}
 							role="button"
 							tabindex="0"
-							onkeydown={(e) => { if (e.key === 'Enter') { if (node.type === 'file') openEditor(node); else onClickNode(node.id); } }}
+							onkeydown={(e) => { if (e.key === 'Enter') { if (node.type === 'file') openInlinePanel(node); else onClickNode(node.id); } }}
 						>{#each node.label.split('') as char, ci}<tspan
 								class="char"
 								class:introduced
@@ -1040,6 +1045,31 @@
 							>▸{childCount}</text>
 						{/if}
 					{/if}
+				{/if}
+
+				{#if inlineNode?.id === node.id}
+					{@const PANEL_W = 320}
+					{@const PANEL_H = 220}
+					{@const px_off = tw(node.label, p.fs) / 2 + 14}
+					{@const sc = Math.max(0.5, Math.min(2, p.fs / 11))}
+					<foreignObject
+						x={p.x + px_off}
+						y={p.y - (PANEL_H * sc) / 2}
+						width={PANEL_W * sc}
+						height={PANEL_H * sc}
+						opacity={p.opacity}
+					>
+						<div class="inline-panel" style="width:{PANEL_W}px; height:{PANEL_H}px; transform: scale({sc}); transform-origin: top left;">
+							{#if inlineMode === 'edit'}
+								<div class="inline-edit" bind:this={inlineEl}></div>
+							{:else}
+								<div class="inline-view">{@html marked(inlineContent)}</div>
+							{/if}
+							<div class="inline-hint">
+								{#if inlineMode === 'edit'}vim · :w :wq :q{:else}i/Enter edit · Esc close{/if}
+							</div>
+						</div>
+					</foreignObject>
 				{/if}
 			{/each}
 		</g>
@@ -1177,31 +1207,7 @@
 		</div>
 	{/if}
 
-	{#if editorNode}
-		<div class="editor-overlay" role="dialog" aria-modal="true">
-			<div class="editor-header">
-				<span class="editor-title">{editorNode.label}</span>
-				<div class="editor-tabs">
-					<button class="editor-tab" class:active={editorMode === 'edit'} onclick={async () => { if (editorMode !== 'edit') { editorMode = 'edit'; await tick(); mountEditor(); } }}>edit</button>
-					<button class="editor-tab" class:active={editorMode === 'view'} onclick={closeEditorToView}>view</button>
-				</div>
-				<button class="editor-close" onclick={closeEditorToTree}>×</button>
-			</div>
-			<div class="editor-body">
-				{#if editorMode === 'edit'}
-					<div class="editor-cm" bind:this={editorEl}></div>
-					<div class="editor-preview">{@html marked(editorContent)}</div>
-				{:else}
-					<div class="editor-view">{@html marked(editorContent)}</div>
-				{/if}
-			</div>
-			{#if editorMode === 'view'}
-				<div class="editor-hint">i / Enter → edit · Esc → back to tree</div>
-			{:else}
-				<div class="editor-hint">vim mode · :w save · :wq save &amp; view · :q view without saving</div>
-			{/if}
-		</div>
-	{/if}
+
 </div>
 
 <style>
@@ -1364,58 +1370,31 @@
 	.file-badge { fill: #888; font-size: 0.8em; }
 	.node-label.focused .file-badge { fill: #a0a09b; }
 
-	.editor-overlay {
-		position: fixed; inset: 0;
-		background: #111;
+	.inline-panel {
 		display: flex; flex-direction: column;
-		z-index: 40;
+		background: #111;
+		border: 1px solid #333;
+		box-sizing: border-box;
+		overflow: hidden;
+	}
+	.inline-view {
+		flex: 1; overflow-y: auto; overflow-x: hidden;
+		padding: 8px 10px;
+		color: #c8c8c0; font-size: 12px; line-height: 1.55;
 		font-family: 'JetBrains Mono', monospace;
 	}
-	.editor-header {
-		display: flex; align-items: center; gap: 1rem;
-		padding: 0.5rem 1rem;
-		background: #1a1a1a; border-bottom: 1px solid #333;
-		flex-shrink: 0;
+	.inline-edit {
+		flex: 1; min-height: 0; overflow: hidden;
 	}
-	.editor-title { flex: 1; font-size: 0.9rem; font-weight: 700; color: #e8e8e3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.editor-tabs { display: flex; gap: 0.5rem; }
-	.editor-tab {
-		background: transparent; border: 1px solid #444; color: #888;
-		font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;
-		padding: 0.2rem 0.6rem; cursor: pointer;
+	.inline-hint {
+		flex-shrink: 0; padding: 2px 8px;
+		background: #0d0d0d; border-top: 1px solid #1e1e1e;
+		color: #555; font-size: 10px; font-family: 'JetBrains Mono', monospace;
 	}
-	.editor-tab.active { background: #2e2e2e; color: #e8e8e3; border-color: #666; }
-	.editor-tab:hover { color: #e8e8e3; }
-	.editor-close {
-		background: transparent; border: none; color: #666;
-		font-size: 1.1rem; cursor: pointer; padding: 0 0.25rem;
-	}
-	.editor-close:hover { color: #e8e8e3; }
-	.editor-body {
-		flex: 1; display: flex; min-height: 0;
-	}
-	.editor-cm {
-		flex: 1; min-width: 0; overflow: hidden;
-	}
-	.editor-preview {
-		width: 40%; border-left: 1px solid #222;
-		padding: 1rem 1.5rem; overflow-y: auto;
-		color: #c8c8c0; font-size: 0.9rem; line-height: 1.6;
-	}
-	.editor-view {
-		flex: 1; padding: 2rem 4rem; overflow-y: auto;
-		color: #c8c8c0; font-size: 1rem; line-height: 1.7;
-		max-width: 72ch; margin: 0 auto;
-	}
-	.editor-hint {
-		flex-shrink: 0; padding: 0.35rem 1rem;
-		background: #0d0d0d; border-top: 1px solid #222;
-		color: #555; font-size: 0.72rem;
-	}
-	:global(.editor-preview h1, .editor-preview h2, .editor-preview h3,
-	         .editor-view h1, .editor-view h2, .editor-view h3) { color: #e8e8e3; margin-top: 1.2em; }
-	:global(.editor-preview p, .editor-view p) { margin: 0.6em 0; }
-	:global(.editor-preview code, .editor-view code) { background: #222; padding: 0.1em 0.3em; border-radius: 2px; font-size: 0.88em; }
-	:global(.editor-preview pre, .editor-view pre) { background: #1a1a1a; padding: 0.75em 1em; overflow-x: auto; }
-	:global(.editor-preview a, .editor-view a) { color: #7a9fd4; }
+	:global(.inline-view h1, .inline-view h2, .inline-view h3) { color: #e8e8e3; margin: 0.5em 0 0.25em; font-size: 1em; }
+	:global(.inline-view p) { margin: 0.3em 0; }
+	:global(.inline-view code) { background: #1e1e1e; padding: 0.05em 0.25em; }
+	:global(.inline-view pre) { background: #1a1a1a; padding: 0.4em 0.6em; overflow-x: auto; }
+	:global(.inline-view ul, .inline-view ol) { padding-left: 1.2em; margin: 0.3em 0; }
+	:global(.inline-view a) { color: #7a9fd4; }
 </style>
