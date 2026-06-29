@@ -20,8 +20,25 @@ A SvelteKit + SVG interactive tree graph backed by a real filesystem. No 3D libr
 ## API (`/api/nodes`)
 - `GET` — scans `content/` recursively, returns `{ nodes, edges }`. Root node (`content/`) is excluded.
 - `POST { parentPath, name }` — creates a new subdirectory
-- `PATCH { path, newName }` — renames a directory
+- `PATCH { path, newName }` — renames a directory (in-place)
+- `PATCH { action: 'move', path, newParentPath }` — moves a directory to a new parent
+- `PUT { path, newParentPath, shallow? }` — copies a directory to a new parent; `shallow=true` creates empty dir (no children)
 - `DELETE { path }` — removes a directory recursively
+
+## API (`/api/undo`)
+- `GET` — returns `{ canUndo, canRedo }`
+- `POST { action: 'undo' }` — undoes last operation
+- `POST { action: 'redo' }` — redoes last undone operation
+
+## Undo/Redo Architecture
+- Server-side in-memory action log in `src/routes/api/history.ts`
+- `undoStack` / `redoStack` — arrays of `UndoAction` (module-level singletons, persist across requests in dev)
+- Each mutating API call pushes to `undoStack` via `pushUndo()` and clears `redoStack`
+- `UndoAction` types: `create`, `delete`, `rename`, `move`, `copy`
+- `delete` actions snapshot the directory to `.tree-snapshots/` before deletion so it can be restored
+- `applyUndo(action)` inverts the action and returns the inverse action (pushed to `redoStack` on undo, back to `undoStack` on redo)
+- `u` key calls `POST /api/undo { action: 'undo' }` then reloads tree
+- `Ctrl+r` calls `POST /api/undo { action: 'redo' }` then reloads tree
 
 ## Features
 - Starts focused on root node
@@ -44,6 +61,11 @@ A SvelteKit + SVG interactive tree graph backed by a real filesystem. No 3D libr
 - `J/K` — jump to bottom / top of current column
 - `o` — create sibling node (same column) with inline rename prompt
 - `O` — create child node (next column) with inline rename prompt
+- `y` — yank node only (no children); `Y` — yank with full subtree
+- `m` — mark focused node for move
+- `p` — paste/move as sibling of focused node (under focused node's parent); `P` — paste/move as child of focused node
+- `u` — undo last operation; `Ctrl+r` — redo
+- Escape cancels active yank/move mode
 - `x` — delete focused node (prompts confirmation; Enter to confirm, Escape to cancel)
 - `Space` — toggle bird's eye view (full tree) / zoomed view
 - In bird's eye, `hjkl` updates selected node without zooming in — Space zooms into selection

@@ -83,6 +83,64 @@
 		return res.ok;
 	}
 
+	async function apiMoveNode(path: string, newParentPath: string): Promise<{ ok: boolean; path?: string }> {
+		const res = await fetch('/api/nodes', {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ action: 'move', path, newParentPath })
+		});
+		if (!res.ok) return { ok: false };
+		return res.json();
+	}
+
+	async function apiCopyNode(path: string, newParentPath: string, shallow = false): Promise<{ ok: boolean; path?: string }> {
+		const res = await fetch('/api/nodes', {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ path, newParentPath, shallow })
+		});
+		if (!res.ok) return { ok: false };
+		return res.json();
+	}
+
+	async function apiUndo(): Promise<string | null> {
+		const res = await fetch('/api/undo', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ action: 'undo' })
+		});
+		if (!res.ok) return null;
+		const data = await res.json();
+		return data.ok ? (data.focusPath ?? null) : null;
+	}
+
+	async function apiRedo(): Promise<string | null> {
+		const res = await fetch('/api/undo', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ action: 'redo' })
+		});
+		if (!res.ok) return null;
+		const data = await res.json();
+		return data.ok ? (data.focusPath ?? null) : null;
+	}
+
+	async function applyUndoRedo(focusPath: string | null) {
+		await loadTree();
+		if (!focusPath) return;
+		const id = focusPath.replace(/^\//, '').replace(/\//g, '|');
+		const node = nodes.find(n => n.id === id);
+		if (node) {
+			focusNode(id);
+		} else {
+			// node was deleted by this undo — focus its parent
+			const parts = focusPath.split('/').filter(Boolean);
+			parts.pop();
+			const parentId = parts.join('|') || rootId();
+			focusNode(parentId);
+		}
+	}
+
 	async function apiRenameNode(path: string, newName: string): Promise<boolean> {
 		const res = await fetch('/api/nodes', {
 			method: 'PATCH',
@@ -262,6 +320,11 @@
 	// Delete confirm state
 	let confirmDeleteId = $state<string | null>(null);
 
+	// Yank / move state
+	let yankId   = $state<string | null>(null);
+	let yankDeep = $state(false);
+	let moveId   = $state<string | null>(null);
+
 	onMount(async () => {
 		await loadTree();
 		requestAnimationFrame(() => { introduced = true; });
@@ -356,14 +419,18 @@
 		if (!renamingId) return;
 		const node = nodes.find(n => n.id === renamingId);
 		const newName = renameValue.trim();
-		if (!node || !newName) { cancelRename(); return; }
-		if (newName === node.label && !renamingIsNew) { cancelRename(); return; }
-		if (newName === node.label && renamingIsNew) { renamingId = null; renameValue = ''; renamingIsNew = false; return; }
-		const ok = await apiRenameNode(node.path, newName);
 		renamingId = null;
 		renameValue = '';
+		const wasNew = renamingIsNew;
 		renamingIsNew = false;
-		if (ok) await loadTree();
+		if (!node || !newName) { if (wasNew) { apiDeleteNode(node!.path).then(() => loadTree()); } return; }
+		if (newName === node.label && !wasNew) { return; }
+		if (newName === node.label && wasNew) { focusNode(node.id); return; }
+		const parentPath = node.path.split('/').slice(0, -1).join('/') || '/';
+		const newPath = parentPath === '/' ? `/${newName}` : `${parentPath}/${newName}`;
+		const newId = newPath.replace(/^\//, '').replace(/\//g, '|');
+		const ok = await apiRenameNode(node.path, newName);
+		if (ok) { await loadTree(); focusNode(newId); }
 	}
 
 	function cancelRename() {
@@ -383,13 +450,18 @@
 
 	function onKeyNav(e: KeyboardEvent) {
 		if (renamingId) return;
+		if (e.key === 'r' && e.ctrlKey) {
+			e.preventDefault();
+			apiRedo().then(applyUndoRedo);
+			return;
+		}
 		if (showCmd)    { if (e.key === 'Escape') closeCmd();    return; }
 		if (showSearch) { if (e.key === 'Escape') closeSearch(); return; }
 
 		if (e.key === ':') { e.preventDefault(); openCmd();    return; }
 		if (e.key === '/') { e.preventDefault(); openSearch(); return; }
 		if (e.key === '?') { showHelp = !showHelp; return; }
-		if (e.key === 'Escape') { showHelp = false; confirmDeleteId = null; return; }
+		if (e.key === 'Escape') { showHelp = false; confirmDeleteId = null; yankId = null; moveId = null; return; }
 
 		if (confirmDeleteId) {
 			if (e.key === 'Enter') {
@@ -404,6 +476,67 @@
 			return;
 		}
 
+		if (e.key === 'y' || e.key === 'Y') {
+			e.preventDefault();
+			if (focusId) { yankId = focusId; yankDeep = e.key === 'Y'; moveId = null; }
+			return;
+		}
+		if (e.key === 'm') {
+			e.preventDefault();
+			if (focusId) { moveId = focusId; yankId = null; }
+			return;
+		}
+		if (e.key === 'u') {
+			e.preventDefault();
+			apiUndo().then(applyUndoRedo);
+			return;
+		}
+		if (e.key === 'p' || e.key === 'P') {
+			e.preventDefault();
+			const dest = focusId;
+			if (!dest) return;
+			const destNode = nodes.find(n => n.id === dest);
+			if (!destNode) return;
+			// p = paste as sibling (under dest's parent), P = paste as child of dest
+			const pasteAsChild = e.key === 'P';
+			const parentNode = pasteAsChild
+				? destNode
+				: (getParents(dest)[0] ? nodes.find(n => n.id === getParents(dest)[0]) : null) ?? destNode;
+			if (yankId) {
+				const srcNode = nodes.find(n => n.id === yankId);
+				if (!srcNode) return;
+				const deep = yankDeep;
+				yankId = null;
+				apiCopyNode(srcNode.path, parentNode.path, !deep).then(async (res) => {
+					if (!res.ok) return;
+					await loadTree();
+					const newId = (parentNode.path + '/' + srcNode.path.split('/').pop())
+						.replace(/^\//, '').replace(/\//g, '|');
+					focusNode(newId);
+				});
+			} else if (moveId) {
+				const srcNode = nodes.find(n => n.id === moveId);
+				if (!srcNode) return;
+				if (pasteAsChild && (dest.startsWith(moveId + '|') || dest === moveId)) return;
+				moveId = null;
+				apiMoveNode(srcNode.path, parentNode.path).then(async (res) => {
+					if (!res.ok) return;
+					await loadTree();
+					const newId = (parentNode.path + '/' + srcNode.path.split('/').pop())
+						.replace(/^\//, '').replace(/\//g, '|');
+					focusNode(newId);
+				});
+			}
+			return;
+		}
+		if (e.key === 'r') {
+			e.preventDefault();
+			if (focusId) {
+				const node = nodes.find(n => n.id === focusId);
+				if (node) startRename(node.id, node.label);
+			}
+			return;
+		}
 		if (e.key === 'x') {
 			e.preventDefault();
 			if (focusId && focusId !== rootId()) confirmDeleteId = focusId;
@@ -655,6 +788,18 @@
 			{#each nodes as node}
 				{@const p = anim[node.id]}
 				{#if p}
+					{#if yankId === node.id || moveId === node.id}
+						{@const pad = p.fs * 0.2}
+						{@const w = tw(node.label, p.fs) + pad * 2}
+						<rect
+							x={p.x - w / 2}
+							y={p.y - p.fs * 1.1 / 2 - p.fs * 0.1}
+							width={w}
+							height={p.fs * 1.1}
+							fill={yankId === node.id ? '#2a4a2a' : '#4a2a2a'}
+							opacity={p.opacity}
+						/>
+					{/if}
 					{#if focusId === node.id}
 						{@const pad = p.fs * 0.2}
 						{@const w = tw(node.label, p.fs) + pad * 2}
@@ -712,7 +857,11 @@
 	</svg>
 
 	<div class="hint">
-		{#if birdseye}
+		{#if yankId}
+			<span style="color:#6a9a6a">{yankDeep ? 'Y' : 'y'}</span> yanked ({yankDeep ? 'subtree' : 'node only'}) · navigate · <span style="color:#6a9a6a">p</span> sibling · <span style="color:#6a9a6a">P</span> child · Esc cancel
+		{:else if moveId}
+			<span style="color:#9a6a6a">m</span> marked · navigate · <span style="color:#9a6a6a">p</span> sibling · <span style="color:#9a6a6a">P</span> child · Esc cancel
+		{:else if birdseye}
 			Space to zoom back in
 		{:else}
 			hjkl navigate · o sibling · O child · <span class="hint-btn" onclick={openSearch}>/ search</span> · Space birds eye · ? help
@@ -816,9 +965,15 @@
 						<tr><td>j / k</td><td>Move down / up in column</td></tr>
 						<tr><td>H / L</td><td>Jump to root / deepest child</td></tr>
 						<tr><td>J / K</td><td>Jump to bottom / top of column</td></tr>
-						<tr><td>o</td><td>Create sibling node (same column)</td></tr>
-						<tr><td>O</td><td>Create child node (next column)</td></tr>
-						<tr><td>x</td><td>Delete focused node</td></tr>
+						<tr><td>r</td><td>Rename focused node</td></tr>
+					<tr><td>y / Y</td><td>Yank node only / with subtree</td></tr>
+					<tr><td>m</td><td>Mark node for move</td></tr>
+					<tr><td>p / P</td><td>Paste as sibling / as child</td></tr>
+					<tr><td>u</td><td>Undo</td></tr>
+					<tr><td>Ctrl+r</td><td>Redo</td></tr>
+					<tr><td>o</td><td>Create sibling node (same column)</td></tr>
+					<tr><td>O</td><td>Create child node (next column)</td></tr>
+					<tr><td>x</td><td>Delete focused node</td></tr>
 						<tr><td>Space</td><td>Toggle bird's eye view</td></tr>
 						<tr><td>Scroll</td><td>Scroll current column</td></tr>
 						<tr><td>/</td><td>Fuzzy search nodes</td></tr>
