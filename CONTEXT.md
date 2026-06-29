@@ -59,6 +59,7 @@ A SvelteKit + SVG interactive tree graph backed by a real filesystem. No 3D libr
 - `k` — move to previous node at same depth (up)
 - `H/L` — jump to root / deepest descendant
 - `J/K` — jump to bottom / top of current column
+- `Tab` — collapse / expand focused node (hides subtree; shows `▸N` badge with child count)
 - `o` — create sibling node (same column) with inline rename prompt
 - `O` — create child node (next column) with inline rename prompt
 - `y` — yank node only (no children); `Y` — yank with full subtree
@@ -147,6 +148,7 @@ Sequential left→right, top→bottom reveal:
 - `introduced` — boolean, flips true on mount to trigger intro animations
 - `showHelp` — boolean, toggles help overlay
 - `confirmDeleteId` — node id pending delete confirmation, or null
+- `collapsed` — `Set<string>` of node ids whose children are hidden; `visibleNodes`/`visibleEdges` are `$derived` filtered views used by all layout/render functions
 - `target` — the layout positions being animated toward
 - `anim` — current interpolated positions (reactive `$state`)
 

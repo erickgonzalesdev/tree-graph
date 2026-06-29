@@ -32,8 +32,22 @@
 
 	let nodes = $state<Node[]>([]);
 	let edges = $state<[string, string][]>([]);
+	let collapsed = $state<Set<string>>(new Set());
+
+	function isHidden(id: string): boolean {
+		const parents = edges.filter(([, b]) => b === id).map(([a]) => a);
+		if (parents.length === 0) return false;
+		const pid = parents[0];
+		return collapsed.has(pid) || isHidden(pid);
+	}
+
+	let visibleNodes = $derived(nodes.filter(n => !isHidden(n.id)));
+	let visibleEdges = $derived(edges.filter(([a, b]) => !isHidden(a) && !isHidden(b) && !collapsed.has(a)));
 
 	function getChildren(id: string) {
+		return visibleEdges.filter(([a]) => a === id).map(([, b]) => b);
+	}
+	function getAllChildren(id: string) {
 		return edges.filter(([a]) => a === id).map(([, b]) => b);
 	}
 	function getParents(id: string) {
@@ -166,7 +180,7 @@
 	}
 
 	function buildDefault(rowH = ROW_H, colGap = COL_GAP): Record<string, NodePos> {
-		if (nodes.length === 0) return {};
+		if (visibleNodes.length === 0) return {};
 		const COL_W = tw('Node X', FS_BASE) + colGap;
 		const result: Record<string, NodePos> = {};
 		const rid = rootId();
@@ -205,7 +219,7 @@
 		const focusDepth = depthOf(fid);
 		const scale = 1.3;
 		const result: Record<string, NodePos> = {};
-		nodes.forEach(n => {
+		visibleNodes.forEach(n => {
 			const depthDelta = depthOf(n.id) - focusDepth;
 			const absDelta = Math.abs(depthDelta);
 			result[n.id] = {
@@ -220,7 +234,7 @@
 
 	function colAt(depth: number): string[] {
 		const base = buildDefault();
-		return nodes
+		return visibleNodes
 			.filter(n => depthOf(n.id) === depth)
 			.sort((a, b) => (base[a.id]?.y ?? 0) - (base[b.id]?.y ?? 0))
 			.map(n => n.id);
@@ -229,7 +243,7 @@
 	// --- Intro animation ---
 
 	function buildIntroSequence(): Record<string, number> {
-		if (nodes.length === 0) return {};
+		if (visibleNodes.length === 0) return {};
 		const delays: Record<string, number> = {};
 		let t = 0;
 		function walk(pid: string) {
@@ -247,13 +261,13 @@
 	}
 
 	function buildNodeTextDelays(): Record<string, number> {
-		if (nodes.length === 0) return {};
+		if (visibleNodes.length === 0) return {};
 		const base = buildDefault();
-		const maxDepth = Math.max(...nodes.map(n => depthOf(n.id)));
+		const maxDepth = Math.max(...visibleNodes.map(n => depthOf(n.id)));
 		const delays: Record<string, number> = {};
 		let colStart = 0;
 		for (let depth = 0; depth <= maxDepth; depth++) {
-			const col = nodes
+			const col = visibleNodes
 				.filter(n => depthOf(n.id) === depth)
 				.sort((a, b) => (base[a.id]?.y ?? 0) - (base[b.id]?.y ?? 0));
 			let t = colStart;
@@ -283,7 +297,7 @@
 		const step = () => {
 			let moving = false;
 			const next: Record<string, NodePos> = {};
-			nodes.forEach(n => {
+			visibleNodes.forEach(n => {
 				const a = anim[n.id] ?? target[n.id];
 				const t = target[n.id];
 				if (!a || !t) return;
@@ -529,6 +543,18 @@
 			}
 			return;
 		}
+		if (e.key === 'Tab') {
+			e.preventDefault();
+			if (focusId && getAllChildren(focusId).length > 0) {
+				const next = new Set(collapsed);
+				if (next.has(focusId)) next.delete(focusId);
+				else next.add(focusId);
+				collapsed = next;
+				target = birdseye ? buildDefault(24, 45) : buildFocused(focusId);
+				startAnim();
+			}
+			return;
+		}
 		if (e.key === 'r') {
 			e.preventDefault();
 			if (focusId) {
@@ -570,7 +596,13 @@
 		let next: string | null = null;
 
 		switch (e.key) {
-			case 'l': { const ch = getChildren(from); if (ch.length) next = ch[0]; break; }
+			case 'l': {
+				if (collapsed.has(from)) {
+					const next2 = new Set(collapsed); next2.delete(from); collapsed = next2;
+					target = birdseye ? buildDefault(24, 45) : buildFocused(from); startAnim(); break;
+				}
+				const ch = getChildren(from); if (ch.length) next = ch[0]; break;
+			}
 			case 'L': { let n = from; while (getChildren(n).length) n = getChildren(n)[0]; if (n !== from) next = n; break; }
 			case 'h': { const par = getParents(from); if (par.length) next = par[0]; break; }
 			case 'H': { let n = from; while (getParents(n).length) n = getParents(n)[0]; if (n !== from) next = n; break; }
@@ -705,7 +737,7 @@
 
 	function buildConnectors(): Connector[] {
 		const result: Connector[] = [];
-		const parentIds = [...new Set(edges.map(([pid]) => pid))];
+		const parentIds = [...new Set(visibleEdges.map(([pid]) => pid))];
 
 		for (const pid of parentIds) {
 			const p = anim[pid];
@@ -713,7 +745,7 @@
 			const children = getChildren(pid);
 			if (!children.length) continue;
 
-			const pLabel = nodes.find(n => n.id === pid)?.label ?? '';
+			const pLabel = visibleNodes.find(n => n.id === pid)?.label ?? '';
 			const px1 = p.x + tw(pLabel, p.fs) / 2;
 
 			// trunk X = midpoint between parent center and children column center
@@ -741,7 +773,7 @@
 			for (const cid of children) {
 				const c = anim[cid];
 				if (!c) continue;
-				const cLabel = nodes.find(n => n.id === cid)?.label ?? '';
+				const cLabel = visibleNodes.find(n => n.id === cid)?.label ?? '';
 				const cx2 = c.x - tw(cLabel, c.fs) / 2;
 				const opacity = Math.min(p.opacity, c.opacity) * 0.85;
 				result.push({
@@ -785,7 +817,7 @@
 				/>
 			{/each}
 
-			{#each nodes as node}
+			{#each visibleNodes as node}
 				{@const p = anim[node.id]}
 				{#if p}
 					{#if yankId === node.id || moveId === node.id}
@@ -850,6 +882,17 @@
 								class:introduced
 								style="animation-delay: {(nodeTextDelays[node.id] ?? 0) + ci * CHAR_DUR}ms"
 							>{char}</tspan>{/each}</text>
+						{#if collapsed.has(node.id)}
+							{@const childCount = getAllChildren(node.id).length}
+							<text
+								class="collapsed-badge"
+								x={p.x + tw(node.label, p.fs) / 2 + p.fs * 0.5}
+								y={p.y}
+								dominant-baseline="middle"
+								font-size={p.fs * 0.75}
+								opacity={p.opacity * 0.7}
+							>▸{childCount}</text>
+						{/if}
 					{/if}
 				{/if}
 			{/each}
@@ -965,6 +1008,7 @@
 						<tr><td>j / k</td><td>Move down / up in column</td></tr>
 						<tr><td>H / L</td><td>Jump to root / deepest child</td></tr>
 						<tr><td>J / K</td><td>Jump to bottom / top of column</td></tr>
+						<tr><td>Tab</td><td>Collapse / expand node</td></tr>
 						<tr><td>r</td><td>Rename focused node</td></tr>
 					<tr><td>y / Y</td><td>Yank node only / with subtree</td></tr>
 					<tr><td>m</td><td>Mark node for move</td></tr>
@@ -1017,6 +1061,7 @@
 	}
 	.node-label:hover  { fill: #222; }
 	.node-label.focused { fill: #f0f0eb; font-weight: 800; }
+	.collapsed-badge { font-family: 'JetBrains Mono', monospace; fill: #888; user-select: none; pointer-events: none; }
 
 	.rename-input {
 		width: 100%;
