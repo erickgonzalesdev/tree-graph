@@ -1,9 +1,14 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
+	import { EditorView, basicSetup } from 'codemirror';
+	import { markdown } from '@codemirror/lang-markdown';
+	import { oneDark } from '@codemirror/theme-one-dark';
+	import { vim, Vim } from '@replit/codemirror-vim';
+	import { marked } from 'marked';
 
 	// --- Types ---
 
-	type Node    = { id: string; label: string; path: string };
+	type Node    = { id: string; label: string; path: string; type?: 'dir' | 'file' };
 	type NodePos = { x: number; y: number; fs: number; opacity: number };
 
 	// --- Constants ---
@@ -327,12 +332,20 @@
 	let introduced = $state(false);
 
 	// Inline rename state
-	let renamingId    = $state<string | null>(null);
-	let renameValue   = $state('');
-	let renamingIsNew = $state(false);
+	let renamingId     = $state<string | null>(null);
+	let renameValue    = $state('');
+	let renamingIsNew  = $state(false);
+	let renamingIsFile = $state(false);
 
 	// Delete confirm state
 	let confirmDeleteId = $state<string | null>(null);
+
+	// Markdown editor / view state
+	let editorNode    = $state<Node | null>(null);
+	let editorContent = $state('');
+	let editorMode    = $state<'edit' | 'view'>('edit');
+	let editorEl      = $state<HTMLElement | null>(null);
+	let editorView: EditorView | null = null;
 
 	// Yank / move state
 	let yankId   = $state<string | null>(null);
@@ -343,6 +356,96 @@
 		await loadTree();
 		requestAnimationFrame(() => { introduced = true; });
 	});
+
+	// --- Markdown editor ---
+
+	async function openEditor(node: Node, mode: 'edit' | 'view' = 'edit') {
+		const res = await fetch(`/api/content?path=${encodeURIComponent(node.path)}`);
+		const data = await res.json();
+		editorContent = data.content ?? '';
+		editorNode = node;
+		editorMode = mode;
+		if (mode === 'edit') {
+			await tick();
+			mountEditor();
+		}
+	}
+
+	function mountEditor() {
+		if (editorView) { editorView.destroy(); editorView = null; }
+		if (!editorEl) return;
+		Vim.defineEx('w', '', () => { saveEditor(); });
+		Vim.defineEx('wq', '', () => { closeEditorToView(); });
+		Vim.defineEx('q', '', () => { closeEditorToView(); });
+		editorView = new EditorView({
+			doc: editorContent,
+			extensions: [
+				vim(),
+				basicSetup,
+				markdown(),
+				oneDark,
+				EditorView.updateListener.of(update => {
+					if (update.docChanged) {
+						editorContent = update.state.doc.toString();
+					}
+				}),
+				EditorView.theme({
+					'&': { height: '100%', fontSize: '14px', fontFamily: "'JetBrains Mono', monospace" },
+					'.cm-scroller': { overflow: 'auto' }
+				}),
+			],
+			parent: editorEl,
+		});
+		(editorView.dom as HTMLElement).focus();
+	}
+
+	async function saveEditor() {
+		if (!editorNode) return;
+		if (editorView) editorContent = editorView.state.doc.toString();
+		await fetch('/api/content', {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ path: editorNode.path, content: editorContent })
+		});
+	}
+
+	async function closeEditorToView() {
+		await saveEditor();
+		if (editorView) { editorView.destroy(); editorView = null; }
+		editorMode = 'view';
+	}
+
+	function closeEditorToTree() {
+		if (editorView) { editorView.destroy(); editorView = null; }
+		editorNode = null;
+		editorMode = 'edit';
+	}
+
+	async function createMarkdownFile() {
+		const parentId = focusId ?? rootId();
+		const parent = nodes.find(n => n.id === parentId);
+		if (!parent) return;
+		let tempName = 'new-note';
+		let suffix = 1;
+		while (nodes.some(n => n.path === `${parent.path}/${tempName}.md`)) {
+			tempName = `new-note-${suffix++}`;
+		}
+		const res = await fetch('/api/nodes', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ parentPath: parent.path, name: tempName, type: 'file' })
+		});
+		if (!res.ok) return;
+		await loadTree();
+		await tick();
+		const newNode = nodes.find(n => n.path === `${parent.path}/${tempName}.md`);
+		if (newNode) {
+			focusNode(newNode.id);
+			await tick();
+			startRename(newNode.id, newNode.label, true);
+			renamingIsFile = true;
+		}
+	}
 
 	function focusOnMount(el: HTMLElement) { setTimeout(() => el.focus(), 0); }
 
@@ -435,24 +538,38 @@
 		const newName = renameValue.trim();
 		renamingId = null;
 		renameValue = '';
-		const wasNew = renamingIsNew;
-		renamingIsNew = false;
+		const wasNew  = renamingIsNew;
+		const wasFile = renamingIsFile;
+		renamingIsNew  = false;
+		renamingIsFile = false;
 		if (!node || !newName) { if (wasNew) { apiDeleteNode(node!.path).then(() => loadTree()); } return; }
 		if (newName === node.label && !wasNew) { return; }
-		if (newName === node.label && wasNew) { focusNode(node.id); return; }
+		if (newName === node.label && wasNew) {
+			if (wasFile) { openEditor(node, 'edit'); } else { focusNode(node.id); }
+			return;
+		}
 		const parentPath = node.path.split('/').slice(0, -1).join('/') || '/';
-		const newPath = parentPath === '/' ? `/${newName}` : `${parentPath}/${newName}`;
+		const newNameWithExt = wasFile && !newName.endsWith('.md') ? `${newName}.md` : newName;
+		const newPath = parentPath === '/' ? `/${newNameWithExt}` : `${parentPath}/${newNameWithExt}`;
 		const newId = newPath.replace(/^\//, '').replace(/\//g, '|');
 		const ok = await apiRenameNode(node.path, newName);
-		if (ok) { await loadTree(); focusNode(newId); }
+		if (ok) {
+			await loadTree();
+			focusNode(newId);
+			if (wasFile) {
+				const freshNode = nodes.find(n => n.id === newId);
+				if (freshNode) openEditor(freshNode, 'edit');
+			}
+		}
 	}
 
 	function cancelRename() {
 		const id = renamingId;
 		const isNew = renamingIsNew;
-		renamingId    = null;
-		renameValue   = '';
-		renamingIsNew = false;
+		renamingId     = null;
+		renameValue    = '';
+		renamingIsNew  = false;
+		renamingIsFile = false;
 		if (isNew && id) {
 			const node = nodes.find(n => n.id === id);
 			if (node) {
@@ -463,6 +580,19 @@
 	}
 
 	function onKeyNav(e: KeyboardEvent) {
+		if (editorNode) {
+			if (editorMode === 'view') {
+				if (e.key === 'i' || e.key === 'Enter') {
+					e.preventDefault();
+					editorMode = 'edit';
+					tick().then(mountEditor);
+				} else if (e.key === 'Escape') {
+					e.preventDefault();
+					closeEditorToTree();
+				}
+			}
+			return;
+		}
 		if (renamingId) return;
 		if (e.key === 'r' && e.ctrlKey) {
 			e.preventDefault();
@@ -568,6 +698,11 @@
 			if (focusId && focusId !== rootId()) confirmDeleteId = focusId;
 			return;
 		}
+		if (e.key === 'n') {
+			e.preventDefault();
+			createMarkdownFile();
+			return;
+		}
 		if (e.key === 'o') {
 			e.preventDefault();
 			createSiblingNode();
@@ -587,7 +722,15 @@
 			return;
 		}
 
-		if (!['h','j','k','l','H','J','K','L'].includes(e.key)) return;
+		if (e.key === 'Enter') {
+		e.preventDefault();
+		if (focusId) {
+			const node = nodes.find(n => n.id === focusId);
+			if (node?.type === 'file') openEditor(node);
+		}
+		return;
+	}
+	if (!['h','j','k','l','H','J','K','L'].includes(e.key)) return;
 		e.preventDefault();
 
 		const from = focusId ?? rootId();
@@ -873,15 +1016,18 @@
 							dominant-baseline="middle"
 							font-size={p.fs}
 							opacity={p.opacity}
-							onclick={() => onClickNode(node.id)}
+							onclick={() => {
+								if (node.type === 'file' && focusId === node.id) { openEditor(node); }
+								else { onClickNode(node.id); }
+							}}
 							role="button"
 							tabindex="0"
-							onkeydown={(e) => e.key === 'Enter' && onClickNode(node.id)}
+							onkeydown={(e) => { if (e.key === 'Enter') { if (node.type === 'file') openEditor(node); else onClickNode(node.id); } }}
 						>{#each node.label.split('') as char, ci}<tspan
 								class="char"
 								class:introduced
 								style="animation-delay: {(nodeTextDelays[node.id] ?? 0) + ci * CHAR_DUR}ms"
-							>{char}</tspan>{/each}</text>
+							>{char}</tspan>{/each}{#if node.type === 'file'}<tspan class="file-badge"> ¶</tspan>{/if}</text>
 						{#if collapsed.has(node.id)}
 							{@const childCount = getAllChildren(node.id).length}
 							<text
@@ -1015,6 +1161,7 @@
 					<tr><td>p / P</td><td>Paste as sibling / as child</td></tr>
 					<tr><td>u</td><td>Undo</td></tr>
 					<tr><td>Ctrl+r</td><td>Redo</td></tr>
+					<tr><td>n</td><td>Create markdown file in focused node</td></tr>
 					<tr><td>o</td><td>Create sibling node (same column)</td></tr>
 					<tr><td>O</td><td>Create child node (next column)</td></tr>
 					<tr><td>x</td><td>Delete focused node</td></tr>
@@ -1027,6 +1174,32 @@
 					</tbody>
 				</table>
 			</div>
+		</div>
+	{/if}
+
+	{#if editorNode}
+		<div class="editor-overlay" role="dialog" aria-modal="true">
+			<div class="editor-header">
+				<span class="editor-title">{editorNode.label}</span>
+				<div class="editor-tabs">
+					<button class="editor-tab" class:active={editorMode === 'edit'} onclick={async () => { if (editorMode !== 'edit') { editorMode = 'edit'; await tick(); mountEditor(); } }}>edit</button>
+					<button class="editor-tab" class:active={editorMode === 'view'} onclick={closeEditorToView}>view</button>
+				</div>
+				<button class="editor-close" onclick={closeEditorToTree}>×</button>
+			</div>
+			<div class="editor-body">
+				{#if editorMode === 'edit'}
+					<div class="editor-cm" bind:this={editorEl}></div>
+					<div class="editor-preview">{@html marked(editorContent)}</div>
+				{:else}
+					<div class="editor-view">{@html marked(editorContent)}</div>
+				{/if}
+			</div>
+			{#if editorMode === 'view'}
+				<div class="editor-hint">i / Enter → edit · Esc → back to tree</div>
+			{:else}
+				<div class="editor-hint">vim mode · :w save · :wq save &amp; view · :q view without saving</div>
+			{/if}
 		</div>
 	{/if}
 </div>
@@ -1187,4 +1360,62 @@
 	.confirm-yes:hover { background: #e06c75; color: #1a1a1a; }
 	.confirm-no    { color: #888; }
 	.confirm-no:hover  { background: #333; color: #e8e8e3; }
+
+	.file-badge { fill: #888; font-size: 0.8em; }
+	.node-label.focused .file-badge { fill: #a0a09b; }
+
+	.editor-overlay {
+		position: fixed; inset: 0;
+		background: #111;
+		display: flex; flex-direction: column;
+		z-index: 40;
+		font-family: 'JetBrains Mono', monospace;
+	}
+	.editor-header {
+		display: flex; align-items: center; gap: 1rem;
+		padding: 0.5rem 1rem;
+		background: #1a1a1a; border-bottom: 1px solid #333;
+		flex-shrink: 0;
+	}
+	.editor-title { flex: 1; font-size: 0.9rem; font-weight: 700; color: #e8e8e3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.editor-tabs { display: flex; gap: 0.5rem; }
+	.editor-tab {
+		background: transparent; border: 1px solid #444; color: #888;
+		font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;
+		padding: 0.2rem 0.6rem; cursor: pointer;
+	}
+	.editor-tab.active { background: #2e2e2e; color: #e8e8e3; border-color: #666; }
+	.editor-tab:hover { color: #e8e8e3; }
+	.editor-close {
+		background: transparent; border: none; color: #666;
+		font-size: 1.1rem; cursor: pointer; padding: 0 0.25rem;
+	}
+	.editor-close:hover { color: #e8e8e3; }
+	.editor-body {
+		flex: 1; display: flex; min-height: 0;
+	}
+	.editor-cm {
+		flex: 1; min-width: 0; overflow: hidden;
+	}
+	.editor-preview {
+		width: 40%; border-left: 1px solid #222;
+		padding: 1rem 1.5rem; overflow-y: auto;
+		color: #c8c8c0; font-size: 0.9rem; line-height: 1.6;
+	}
+	.editor-view {
+		flex: 1; padding: 2rem 4rem; overflow-y: auto;
+		color: #c8c8c0; font-size: 1rem; line-height: 1.7;
+		max-width: 72ch; margin: 0 auto;
+	}
+	.editor-hint {
+		flex-shrink: 0; padding: 0.35rem 1rem;
+		background: #0d0d0d; border-top: 1px solid #222;
+		color: #555; font-size: 0.72rem;
+	}
+	:global(.editor-preview h1, .editor-preview h2, .editor-preview h3,
+	         .editor-view h1, .editor-view h2, .editor-view h3) { color: #e8e8e3; margin-top: 1.2em; }
+	:global(.editor-preview p, .editor-view p) { margin: 0.6em 0; }
+	:global(.editor-preview code, .editor-view code) { background: #222; padding: 0.1em 0.3em; border-radius: 2px; font-size: 0.88em; }
+	:global(.editor-preview pre, .editor-view pre) { background: #1a1a1a; padding: 0.75em 1em; overflow-x: auto; }
+	:global(.editor-preview a, .editor-view a) { color: #7a9fd4; }
 </style>

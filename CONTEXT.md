@@ -8,22 +8,30 @@ A SvelteKit + SVG interactive tree graph backed by a real filesystem. No 3D libr
 - **Pure SVG** for rendering
 - **TypeScript**
 - **JetBrains Mono** via Google Fonts
+- **CodeMirror 6** + `@replit/codemirror-vim` for markdown editor
+- **marked** for markdown rendering
 - Main UI: `src/routes/+page.svelte`
-- API: `src/routes/api/nodes/+server.ts`
+- API: `src/routes/api/nodes/+server.ts`, `src/routes/api/content/+server.ts`
 
 ## Filesystem Structure
 - `content/` is the root directory; its children are the top-level nodes
 - `content/` itself is never emitted as a node — the API scans its children directly
 - Node IDs are path-based: `node-1|node-2|node-4` (slashes replaced with `|`)
 - Node paths are relative to `content/`: `/node-1/node-2/node-4`
+- Directories become `type:'dir'` nodes; `.md` files become `type:'file'` nodes
+- File node IDs include the `.md` extension in the path: `parent|note.md`
 
 ## API (`/api/nodes`)
-- `GET` — scans `content/` recursively, returns `{ nodes, edges }`. Root node (`content/`) is excluded.
-- `POST { parentPath, name }` — creates a new subdirectory
-- `PATCH { path, newName }` — renames a directory (in-place)
-- `PATCH { action: 'move', path, newParentPath }` — moves a directory to a new parent
-- `PUT { path, newParentPath, shallow? }` — copies a directory to a new parent; `shallow=true` creates empty dir (no children)
-- `DELETE { path }` — removes a directory recursively
+- `GET` — scans `content/` recursively, returns `{ nodes, edges }`. Root node (`content/`) is excluded. Includes `.md` files as `type:'file'` nodes.
+- `POST { parentPath, name }` — creates a new subdirectory (default) or `.md` file (`type:'file'`)
+- `PATCH { path, newName }` — renames a node (preserves `.md` extension for file nodes)
+- `PATCH { action: 'move', path, newParentPath }` — moves a node to a new parent
+- `PUT { path, newParentPath, shallow? }` — copies a node; `shallow=true` creates empty dir
+- `DELETE { path }` — removes a node recursively
+
+## API (`/api/content`)
+- `GET ?path=<relpath>` — reads `.md` file contents, returns `{ content }`
+- `PUT { path, content }` — writes `.md` file contents
 
 ## API (`/api/undo`)
 - `GET` — returns `{ canUndo, canRedo }`
@@ -60,6 +68,8 @@ A SvelteKit + SVG interactive tree graph backed by a real filesystem. No 3D libr
 - `H/L` — jump to root / deepest descendant
 - `J/K` — jump to bottom / top of current column
 - `Tab` — collapse / expand focused node (hides subtree; shows `▸N` badge with child count)
+- `n` — create markdown file (`.md`) in the focused directory; inline rename; then opens editor
+- `Enter` — open editor for focused file node (or click node when already focused)
 - `o` — create sibling node (same column) with inline rename prompt
 - `O` — create child node (next column) with inline rename prompt
 - `y` — yank node only (no children); `Y` — yank with full subtree
@@ -202,8 +212,18 @@ Sequential left→right, top→bottom reveal:
 | `focus <name>` | Focus node by exact name |
 | `q` / `quit` | Close command bar |
 
-## Possible Next Steps
-- Add labels or metadata to nodes
-- Add pan/zoom via pointer events
-- Persist focus state in URL
-- Support moving nodes (drag or cut/paste)
+## Markdown Editor
+- `n` key creates a new `.md` file in the focused node's directory (inline rename → then opens editor)
+- File nodes display a `¶` badge suffix in the tree
+- Editor is a full-screen overlay (CodeMirror + vim mode + live markdown preview)
+- Split view: left = editor, right = live preview rendered by `marked`
+- Vim ex commands: `:w` save, `:wq` save & enter view mode, `:q` enter view mode without saving
+- View mode: full rendered markdown; `i` or `Enter` → back to editor; `Esc` → back to tree
+- `renamingIsFile` flag distinguishes file rename from dir rename — triggers `openEditor` after commit
+
+## Roadmap
+- Duplicate node in place (`d`)
+- Manual sibling reordering (`.order` file + `Ctrl+J`/`Ctrl+K`)
+- Multi-select
+- Org-mode support (future)
+- Visual distinction for file vs dir nodes beyond `¶` badge
